@@ -19,4 +19,4 @@ Parameters have a value and a type. The 3 types are:
 
 - Variable (JVar): Will be changed by optimizers operating on a Path.
 - Settings (JSet): Unchanged by optimizers, but affect the result of the Journey.
-- Options  (JOpt): Unchanged by optimizers, and don't affect the result of any Path on the Journey. These are parameters such as plot=True and verbose=False. Any JParams of this type will be ignored when looking up or saving the Path results.
+- Options (JOpt): Unchanged by optimizers, and don't affect the result of any Path on the Journey. These are parameters such as plot=True and verbose=False. Any JParams of this type will be ignored when looking up or saving the Path results.

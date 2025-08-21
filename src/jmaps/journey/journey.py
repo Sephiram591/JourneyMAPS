@@ -5,6 +5,14 @@ from jmaps.journey.environment import JEnv
 
 class Journey:
     def __init__(self, name, envs: Union[dict[str, JEnv], list[JEnv]] | None = None, paths: Union[dict[str, JPath], list[JPath]] | None = None):
+        '''
+        Journey is a class that represents a journey.
+        It contains a dictionary of environments and a dictionary of paths.
+        Args:
+            name (str): The name of the journey.
+            envs (Union[dict[str, JEnv], list[JEnv]]): A dictionary or list of environments, where the key is the name of the environment. If a dictionary is provided, the keys should match the names of the environments.
+            paths (Union[dict[str, JPath], list[JPath]]): A dictionary or list of paths, where the key is the name of the path. If a dictionary is provided, the keys should match the names of the paths.
+        '''
         if envs is None:
             envs = {}
         if paths is None:
@@ -27,28 +35,41 @@ class Journey:
 
     # Getters and setters
     def add_env(self, env: JEnv):
+        '''Adds an environment, raising an error if an environment with the same name already exists.'''
+        if env.name in self.envs:
+            raise ValueError(f"Environment {env.name} already exists in Journey {self.name}")
         self.envs[env.name] = env
     def add_envs(self, envs: list[JEnv]):
+        '''Adds a list of environments, raising an error if an environment with the same name already exists.'''
         for env in envs:
             self.add_env(env)
     def get_env(self, name):
+        '''Returns the environment with the given name.'''
         return self.envs[name]
     def get_envs(self):
-        return self.envs
+        '''Returns a copy of the environments.'''
+        return self.envs.copy()
     def add_path(self, path: JPath, validate: bool=True):
+        '''Adds a path, raising an error if a path with the same name already exists.'''
+        if path.name in self.paths:
+            raise ValueError(f"Path {path.name} already exists in Journey {self.name}")
         self.paths[path.name] = path
         if validate:
             self.validate_paths(error=False)
     def add_paths(self, new_paths: list[JPath]):
+        '''Adds a list of paths, raising an error if a path with the same name already exists.'''
         for path in new_paths:
             self.add_path(path, validate=False)
         self.validate_paths(error=False)
     def get_path(self, name):
+        '''Returns the path with the given name.'''
         return self.paths[name]
     def get_paths(self):
-        return self.paths
+        '''Returns a copy of the paths.'''
+        return self.paths.copy()
 
     def validate_paths(self, error: bool=True):
+        '''Validates the paths by checking that all environments used in the paths are defined in the journey.'''
         invalid_paths = []
         missing_envs_list = []
         for path_name, path in self.paths.items():
@@ -70,6 +91,13 @@ class Journey:
 
     
     def run_path(self, path_name: str, force_run: bool=False, verbose: bool=False, use_cache: bool=True):
+        '''Runs a path, raising an error if the path is not found in the journey.
+        Args:
+            path_name (str): The name of the path to run.
+            force_run (bool): Whether to force the path to run even if the environments match a cached result.
+            verbose (bool): Whether to print verbose output.
+            use_cache (bool): If false, the results will not be loaded or saved to the cache.
+        '''
         if path_name not in self.paths:
             raise ValueError(f"Path {path_name} not found in Journey {self.name}")
         if use_cache:
@@ -82,6 +110,7 @@ class Journey:
 
     # Overrides
     def get_str(self):
+        '''Returns a string representation of the journey.'''
         string = f"Journey({self.name})\n"
         string += f"Environments:\n"
         for env_name, env in self.envs.items():

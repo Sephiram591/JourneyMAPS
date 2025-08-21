@@ -54,12 +54,20 @@ class GDS_Tidy3DPath(JPath):
     def plot_geom(self, envs: dict[str, JEnv], layer_name: str, validate=True):
         sim, td_c, modeler = self.get_simulation(envs)
         # we can plot the tidy3d simulation setup
-        fig, ax = plt.subplots(3, 1)
-        sim.plot(z=td_c.get_layer_center(layer_name)[2], ax=ax[0])
-        sim.plot(x=td_c.ports[0].dcenter[0], ax=ax[1])
-        sim.plot(y=td_c.ports[0].dcenter[1], ax=ax[2])
-        fig.tight_layout()
-        plt.show()
+        if self.custom_fdtd:
+            fig, ax = plt.subplots(3, 1)
+            sim.plot(z=td_c.get_layer_center(layer_name)[2], ax=ax[0])
+            sim.plot(x=td_c.ports[0].dcenter[0], ax=ax[1])
+            sim.plot(y=td_c.ports[0].dcenter[1], ax=ax[2])
+            fig.tight_layout()
+            plt.show()
+        else:
+            fig, ax = plt.subplots(3, 1)
+            modeler.plot_sim(z=td_c.get_layer_center(layer_name)[2], ax=ax[0])
+            modeler.plot_sim(x=td_c.ports[0].dcenter[0], ax=ax[1])
+            modeler.plot_sim(y=td_c.ports[0].dcenter[1], ax=ax[2])
+            fig.tight_layout()
+            plt.show()
         if validate:
             validate_sim_for_daily_allowance(sim)
 

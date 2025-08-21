@@ -4,6 +4,13 @@ PARAM_TYPES = Enum('ParamType', ['VAR', 'SET', 'OPT'])
 
 class JParam:
     def __init__(self, value, type: PARAM_TYPES):
+        '''
+        JParam is a class that represents a parameter used in a journey.
+        It contains a value and a type. The value can be any type, and the operators on JParam are overloaded to use the value's operators.
+        Args:
+            value (any): The value of the parameter.
+            type (PARAM_TYPES): The type of the parameter.
+        '''
         self.value = value
         self.type = type
     def __getattr__(self, name):

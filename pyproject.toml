@@ -43,6 +43,7 @@ classifiers = [
 
 dependencies = [
   "numpy >= 1.19.5"
+  "sortedcontainers"
 ]
 
 [project.optional-dependencies]

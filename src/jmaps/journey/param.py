@@ -1,21 +1,34 @@
 from enum import Enum
+import copy
 
-PARAM_TYPES = Enum('ParamType', ['VAR', 'SET', 'OPT'])
-
+class ParamType(Enum):
+    VAR = 'VAR'
+    SET = 'SET'
+    OPT = 'OPT'
+    LAMBDA = 'LAMBDA'
 class JParam:
-    def __init__(self, value, type: PARAM_TYPES):
+    def __init__(self, value, jtype: ParamType):
         '''
         JParam is a class that represents a parameter used in a journey.
         It contains a value and a type. The value can be any type, and the operators on JParam are overloaded to use the value's operators.
         Args:
             value (any): The value of the parameter.
-            type (PARAM_TYPES): The type of the parameter.
+            jtype (ParamType): The type of the parameter.
         '''
         self.value = value
-        self.type = type
+        self.type = jtype
     def __getattr__(self, name):
         return getattr(self.value, name)
 
+    def __deepcopy__(self, memo):
+        # Create a new JParam with deepcopied value and type
+        new_value = copy.deepcopy(self.value, memo)
+        new_type = self.type  # Enum is immutable, no need to deepcopy
+        new_obj = self.__class__.__new__(self.__class__)  # Avoid __init__ recursion
+        new_obj.value = new_value
+        new_obj.type = new_type
+        memo[id(self)] = new_obj
+        return new_obj
     def __str__(self):
         return str(self.value)
 
@@ -112,12 +125,24 @@ class JParam:
     def __hash__(self):
         return hash(self.value)
         
+    # Boolean support
+    def __bool__(self):
+        return bool(self.value)
+        
 class JVar(JParam):
     def __init__(self, value):
-        super().__init__(value, PARAM_TYPES.VAR)
+        super().__init__(value, ParamType.VAR)
 class JSet(JParam):
     def __init__(self, value):
-        super().__init__(value, PARAM_TYPES.SET)
+        super().__init__(value, ParamType.SET)
 class JOpt(JParam):
     def __init__(self, value):
-        super().__init__(value, PARAM_TYPES.OPT)
+        super().__init__(value, ParamType.OPT)
+class JLambda(JParam):
+    def __init__(self, fn):
+        self.fn = fn
+        self.type = ParamType.LAMBDA
+
+    @property
+    def value(self):
+        return self.fn()

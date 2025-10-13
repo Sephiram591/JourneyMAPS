@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 project = "jmaps"
 author = "Helaman Flores"
-copyright = f"{datetime.now().year}, {author}"
+# copyright = f"{datetime.now().year}, {author}"
 
 extensions = [
     "sphinx.ext.autodoc",
@@ -39,3 +39,6 @@ napoleon_numpy_docstring = True
 
 master_doc = "index"
 
+autodoc_mock_imports = [
+    "pmag",
+]

@@ -1,14 +1,10 @@
-Welcome to JourneyMAPS's documentation!
+JourneyMAPS's Documentation
 =================================
 
+Contents
+--------
 .. toctree::
    installation
    api
 
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
 

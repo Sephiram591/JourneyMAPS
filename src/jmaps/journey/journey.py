@@ -276,14 +276,14 @@ class Journey:
         Returns:
             backpack (dict[str, Any]): A dictionary containing whatever you need from the path.
             If the path has been run, the items are:
-                'result': The result of the path.
-                'subpath_results': The results of the subpaths.
-                'cache_filepath': The filepath to the cache file.
+            'result': The result of the path.
+            'subpath_results': The results of the subpaths.
+            'cache_filepath': The filepath to the cache file.
             If the path has not been run, or use_cache is False, or force_run is True, the items are:
-                'safe_envs_stripped': The environments needed by the path.
-                'subpath_results': The results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the results for each batch id.
-                'subpath_files': The file paths that contain the results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the file paths for each batch id.
-                'cache_filepath': The filepath to the cache file.
+            'safe_envs_stripped': The environments needed by the path.
+            'subpath_results': The results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the results for each batch id.
+            'subpath_files': The file paths that contain the results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the file paths for each batch id.
+            'cache_filepath': The filepath to the cache file.
         """
         if path_name not in self.paths:
             raise ValueError(f"Path {path_name} not found in Journey {self.name}")

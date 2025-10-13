@@ -1,5 +1,5 @@
-API Referencesdfasfasdf
-==================
+API Reference
+=============
 
 This page provides comprehensive documentation for all modules in the JourneyMAPS package.
 

@@ -7,13 +7,13 @@ from jmaps.journey.param import JParam, ParamType
 
 class JEnv(dict[str, JParam]):
     def __init__(self, name, params: dict[str, JParam]|None=None):
-        '''
-        JEnv is a class that represents an environment used in a journey.
+        """JEnv is a class that represents an environment used in a journey.
         It wraps a dictionary that is enforced to contain only JParams and a name for the environment.
+        
         Args:
             name (str): The name of the environment.
             params (dict[str, JParam]): A dictionary of JParams, where the key is the name of the parameter.
-        '''
+        """
         super().__init__()
         self.name = name
         self.update(params)

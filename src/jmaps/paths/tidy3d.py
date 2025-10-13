@@ -23,11 +23,12 @@ class GDS_Tidy3DPath(JPath):
     of simulations are formed.
     """
     def __init__(self, custom_fdtd=None, custom_modeler=None, delete_server_data=True):
-        ''' Initialize the GDS_Tidy3DPath.
+        """Initialize the GDS_Tidy3DPath.
+        
         Args:
             custom_fdtd: Name of the custom fdtd environment. If not none, the simulation will be run using tidy3d directly with the custom fdtd parameters.
             custom_modeler: Name of the custom modeler environment, passed to the gds ComponentModeler.
-        '''
+        """
         self.custom_fdtd = custom_fdtd
         self.custom_modeler = custom_modeler
         self.delete_server_data = delete_server_data
@@ -95,11 +96,12 @@ class GDS_Tidy3DPath(JPath):
         return batch_results
 
     def ponder(self, result: Any, subpath_results: dict[str, Any]):
-        ''' Plots the S-parameters of the component if using default gds modeler.
+        """Plots the S-parameters of the component if using default gds modeler.
+        
         Args:
             result: The results of the path run given the environments.
             subpath_results: Dictionary of results from the subpaths.
-        '''
+        """
         if not self.custom_fdtd:
             for batch_result in result:
                 plt.axhline(0, color='k', linestyle='--')
@@ -107,14 +109,16 @@ class GDS_Tidy3DPath(JPath):
                 gp.plot.plot_sparameters(batch_result, logscale=False)
 
     def get_simulation(self, envs: dict[str, JEnv], subpath_results: dict[str, Any], batch_i: int=0):
-        ''' Get the simulation of the component.
+        """Get the simulation of the component.
+        
         Args:
             envs: Dictionary of environment variables.
+        
         Returns:
             sim: tidy3d Simulation object.
             td_c: gds Tidy3DComponent of the component.
             modeler: gds ComponentModeler of the component.
-        '''
+        """
         c = self.get_component(envs, subpath_results, batch_i)
         td_c = gt.Tidy3DComponent(component=c,**envs['component'])
         custom_modeler_params = envs[self.custom_modeler] if self.custom_modeler else {}
@@ -127,12 +131,13 @@ class GDS_Tidy3DPath(JPath):
         return sim, td_c, modeler
 
     def plot_geom(self, envs: dict[str, JEnv], subpath_results: dict[str, Any], layer_name: str, validate=True, batch_i: int=0):
-        ''' Plot the geometry of the component.
+        """Plot the geometry of the component.
+        
         Args:
             envs: Dictionary of environment variables.
             layer_name: Name of the gds layer to plot.
             validate: Whether to validate the simulation for the daily allowance.
-        '''
+        """
         sim, td_c, modeler = self.get_simulation(envs, subpath_results, batch_i)
         # we can plot the tidy3d simulation setup
         if self.custom_fdtd:
@@ -153,12 +158,13 @@ class GDS_Tidy3DPath(JPath):
             validate_sim_for_daily_allowance(sim)
 
     def plot_mode(self, envs: dict[str, JEnv], subpath_results: dict[str, Any], mode_index=0, port_index=0, batch_i: int=0):
-        ''' Plot the mode of the component.
+        """Plot the mode of the component.
+        
         Args:
             envs: Dictionary of environment variables.
             mode_index: Index of the mode to plot.
             port_index: Index of the port to plot.
-        '''
+        """
         c = self.get_component(envs, subpath_results, batch_i)
         custom_modeler_params = envs[self.custom_modeler] if self.custom_modeler else {}
         batch_modeler_params = self.batch_modeler(envs, subpath_results)[batch_i]

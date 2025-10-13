@@ -37,14 +37,14 @@ class Journey:
     for running and introspecting complex multi-step processes.
     """
     def __init__(self, name, envs: Union[dict[str, JEnv], list[JEnv]] | None = None, paths: Union[dict[str, JPath], list[JPath]] | None = None, parent_cache_dir: Path | None = None):
-        '''
-        Journey is a class that represents a journey.
+        """Journey is a class that represents a journey.
         It contains a dictionary of environments and a dictionary of paths.
+        
         Args:
             name (str): The name of the journey.
             envs (Union[dict[str, JEnv], list[JEnv]]): A dictionary or list of environments, where the key is the name of the environment. If a dictionary is provided, the keys should match the names of the environments.
             paths (Union[dict[str, JPath], list[JPath]]): A dictionary or list of paths, where the key is the name of the path. If a dictionary is provided, the keys should match the names of the paths.
-        '''
+        """
         if envs is None:
             envs = {}
         if paths is None:
@@ -103,13 +103,15 @@ class Journey:
         return self.paths.copy()
 
     def circular_subpaths(self, path_name: str, paths_prior: list[str] | None = None) -> bool:
-        '''Checks if the subpaths of a path are circular by building a tree of paths.
+        """Checks if the subpaths of a path are circular by building a tree of paths.
+        
         Args:
             path_name (str): The name of the path to check.
             paths_prior (list[str] | None): A list of paths that have already been called.
+        
         Returns:
             bool: True if the subpaths are circular, False otherwise.
-        '''
+        """
         if paths_prior is None:
             paths_prior = []
         if path_name in paths_prior:
@@ -124,15 +126,17 @@ class Journey:
         
 
     def validate_path(self, path_name: str, error: bool=True, verbose: bool=True) -> tuple[list[str], list[str], list[str]]:
-        '''Validates the path by checking that all environments and subpaths used in the path are defined in the journey.
+        """Validates the path by checking that all environments and subpaths used in the path are defined in the journey.
+        
         Args:
             path_name (str): The name of the path to validate.
             error (bool): Whether to raise an error if the path is invalid.
             verbose (bool): Whether to print a message if the path is invalid.
+        
         Returns:
             missing_envs (list[str]): A list of environment names that are missing from the journey.
             missing_subpaths (list[str]): A list of subpath names that are missing from the journey.
-        '''
+        """
         path = self.paths[path_name]
         missing_envs = []
         missing_subpaths = []
@@ -202,7 +206,8 @@ class Journey:
                 print(error_string)
     
     def run_path(self, path_name: str, force_run: bool=False, use_cache: bool=True, ponder: bool=True, verbose: bool=False, force_subpath_run: bool=False):
-        '''Runs a path, raising an error if the path is not found in the journey.
+        """Runs a path, raising an error if the path is not found in the journey.
+        
         Args:
             path_name (str): The name of the path to run.
             force_run (bool): Whether to force the path to run even if the environments match a cached result.
@@ -210,11 +215,12 @@ class Journey:
             ponder (bool): Whether to ponder the path results.
             verbose (bool): Whether to print verbose output.
             force_subpath_run (bool): Whether to force the subpaths to run even if their results match a cached result.
+        
         Returns:
             result: The results of the path.
             subpath_results: The results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the results for each batch id.
             cache_filepath: The filepath to the cache file. In the future, this might also be a row in a database.
-        '''
+        """
         backpack = self.pack_for_path(path_name, force_run=force_run, use_cache=use_cache, verbose=verbose, force_subpath_run=force_subpath_run)
         if 'result' not in backpack:
             # Run the subpaths, and retrieve the files their results are stored in
@@ -234,13 +240,15 @@ class Journey:
         return result, subpath_results, cache_filepath
 
     def get_cached_env_names(self, path_name: str, batch_envs: JBatch|None=None):
-        '''Gets the set of environments that are used in the path and its subpaths. Excludes batched environments, unless the same environment is used by a different path.
+        """Gets the set of environments that are used in the path and its subpaths. Excludes batched environments, unless the same environment is used by a different path.
+        
         Args:
             path_name (str): The name of the path to get the cached environments for.
             batch (JBatch|None): The batch that will be run for the path_name.
+        
         Returns:
             cached_env_names (set[str]): The set of environments that are used in the path and its subpaths.
-        '''
+        """
         if batch_envs is None:
             cached_env_names = SortedSet(self.paths[path_name].env_names)
         else:
@@ -255,14 +263,16 @@ class Journey:
         
 
     def pack_for_path(self, path_name: str, force_run: bool=False, use_cache: bool=True, verbose: bool=False, force_subpath_run: bool=False):
-        '''Packs your backpack to set out on a path! Returns whatever you need to run the path, but if you've done it already, returns the results of the path.
+        """Packs your backpack to set out on a path! Returns whatever you need to run the path, but if you've done it already, returns the results of the path.
         Note that this will run subpaths required by the path, including batched subpaths.
+        
         Args:
             path_name (str): The name of the path to run.
             force_run (bool): Whether to force the path to run even if the environments match a cached result.
             use_cache (bool): If false, the results will not be loaded or saved to the cache.
             verbose (bool): Whether to print verbose output.
             force_subpath_run (bool): Whether to force the subpaths to run even if their results match a cached result.
+        
         Returns:
             backpack (dict[str, Any]): A dictionary containing whatever you need from the path.
             If the path has been run, the items are:
@@ -274,7 +284,7 @@ class Journey:
                 'subpath_results': The results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the results for each batch id.
                 'subpath_files': The file paths that contain the results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the file paths for each batch id.
                 'cache_filepath': The filepath to the cache file.
-        '''
+        """
         if path_name not in self.paths:
             raise ValueError(f"Path {path_name} not found in Journey {self.name}")
         self.validate_path(path_name, error=True)
@@ -347,10 +357,11 @@ class Journey:
 
 
     def update_envs(self, new_envs: dict[str, JEnv]|list[JEnv]):
-        '''Updates the environments in the journey. Saves the old environment references to last_envs.
+        """Updates the environments in the journey. Saves the old environment references to last_envs.
+        
         Args:
             new_envs (dict[str, JEnv]|list[JEnv]): The new environments to update the journey with.
-        '''
+        """
         # print(self.envs.keys())
         self.last_envs = copy.deepcopy(self.envs)
         if isinstance(new_envs, dict):
@@ -367,14 +378,16 @@ class Journey:
         return False
 
     def load_path_results(self, cache_filepath: Path, subpath_exists_error: bool=False):
-        '''Loads the results of a path from cache.
+        """Loads the results of a path from cache.
+        
         Args:
             cache_filepath (Path): The filepath to the cache file.
             subpath_exists_error (bool): Whether to raise an error if a subpath file is not found.
+        
         Returns:
             result: The results of the path. None if the path is not in the cache, or if a subpath file is not found.
             subpath_results: A dictionary of the results of the subpaths. None if the path is not in the cache, or if a subpath file is not found.
-        '''
+        """
         if cache_filepath.exists():
             with open(cache_filepath, "rb") as f:
                 dill_dict = dill.load(f)
@@ -410,13 +423,14 @@ class Journey:
         return None, None
 
     def save_path_results(self, result:Any, subpath_files: dict[str, Path | dict[str, Path]], cache_filepath: Path):
-        '''Saves the results of a path to cache.
+        """Saves the results of a path to cache.
+        
         Args:
             result: The results of the path.
             subpath_files: A dictionary of the files that contain the results of the subpaths. If a subpath is run with a batch, the value will be a nested dictionary of the files for each batch id.
             cache_filepath: The filepath to the cache file.
             verbose: Whether to print verbose output.
-        '''
+        """
         with open(cache_filepath, "wb") as f:
             dill_dict = {
                 'result': result,

@@ -18,13 +18,13 @@ class JParam:
     object, while retaining metadata in `type`.
     """
     def __init__(self, value, jtype: ParamType):
-        '''
-        JParam is a class that represents a parameter used in a journey.
+        """JParam is a class that represents a parameter used in a journey.
         It contains a value and a type. The value can be any type, and the operators on JParam are overloaded to use the value's operators.
+        
         Args:
             value (any): The value of the parameter.
             jtype (ParamType): The type of the parameter.
-        '''
+        """
         self.value = value
         self.type = jtype
     def __getattr__(self, name):
@@ -141,15 +141,35 @@ class JParam:
         
 class JVar(JParam):
     def __init__(self, value):
+        """Initialize JVar with a value. JVar is a parameter that is changed by optimizers, and affects the result of the Journey.
+        
+        Args:
+            value: The value for this variable parameter.
+        """
         super().__init__(value, ParamType.VAR)
 class JSet(JParam):
     def __init__(self, value):
+        """Initialize JSet with a value. JSet is a parameter that is not changed by optimizers, but affects the result of the Journey.
+        
+        Args:
+            value: The value for this set parameter.
+        """
         super().__init__(value, ParamType.SET)
 class JOpt(JParam):
     def __init__(self, value):
+        """Initialize JOpt with a value. JOpt is an optional parameter that does not affect the result of the Journey.
+        
+        Args:
+            value: The value for this optimization parameter.
+        """
         super().__init__(value, ParamType.OPT)
 class JLambda(JParam):
     def __init__(self, fn):
+        """Initialize JLambda with a function.
+        
+        Args:
+            fn: The function to be called when accessing the value.
+        """
         self.fn = fn
         self.type = ParamType.LAMBDA
 

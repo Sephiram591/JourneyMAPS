@@ -7,6 +7,7 @@ The package provides:
 
 * **Journey Package**: Core functionality for automated parameter search and optimization
 * **Paths Package**: Implementations of specific paths (e.g., Tidy3D)
+
 Contents
 --------
 

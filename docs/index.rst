@@ -5,7 +5,7 @@ Welcome to jmaps's documentation!
    :maxdepth: 2
    :caption: Contents:
 
-   usage
+   installation
    api/index
 
 Indices and tables

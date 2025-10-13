@@ -55,6 +55,9 @@ autodoc_mock_imports = [
     "gplugins",
     "gdstk",
     "sqlalchemy",
+    "dill",
+    "numpy",
+    "matplotlib",
 ]
 
 # Autodoc configuration

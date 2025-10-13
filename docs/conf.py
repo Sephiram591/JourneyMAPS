@@ -3,11 +3,11 @@ import sys
 from datetime import datetime
 
 # Add project root to sys.path so Sphinx can find the package
-# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 project = "jmaps"
 author = "Helaman Flores"
-# copyright = f"{datetime.now().year}, {author}"
+copyright = f"{datetime.now().year}, {author}"
 
 extensions = [
     "sphinx.ext.duration",
@@ -35,8 +35,21 @@ html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 
 
-# master_doc = "index"
+master_doc = "index"
 
 autodoc_mock_imports = [
     "pmag",
 ]
+
+# Autodoc configuration
+autodoc_default_options = {
+    'members': True,
+    'member-order': 'bysource',
+    'special-members': '__init__',
+    'undoc-members': True,
+    'exclude-members': '__weakref__'
+}
+
+# Autosummary configuration
+autosummary_generate = True
+autosummary_imported_members = True

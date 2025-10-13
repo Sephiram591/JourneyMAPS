@@ -1,3 +1,8 @@
+"""SQLAlchemy models for persisting journeys, paths, and results.
+
+These ORM models allow storing environments and path results with relations
+that capture versions and many-to-many associations.
+"""
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime,
     ForeignKey, Table, Enum, UniqueConstraint, Text
@@ -9,6 +14,7 @@ Base = declarative_base()
 
 # ---------------- ENUM for Param Data Type ---------------- #
 class DataType(enum.Enum):
+    """Scalar data types supported by parameter persistence."""
     INT = "int"
     FLOAT = "float"
     STRING = "string"
@@ -24,6 +30,7 @@ pathresult_environment_table = Table(
 
 # ---------------- PARAMS ---------------- #
 class Param(Base):
+    """A single parameter value belonging to an `EnvironmentInstance`."""
     __tablename__ = 'params'
 
     id = Column(Integer, primary_key=True)
@@ -44,6 +51,7 @@ class Param(Base):
 
 # ---------------- ENVIRONMENT & ENVIRONMENT INSTANCES ---------------- #
 class Environment(Base):
+    """A named environment schema; has many `EnvironmentInstance`."""
     __tablename__ = 'environments'
 
     id = Column(Integer, primary_key=True)
@@ -52,6 +60,7 @@ class Environment(Base):
     instances = relationship("EnvironmentInstance", back_populates="environment")
 
 class EnvironmentInstance(Base):
+    """Concrete environment instance with parameter values and path links."""
     __tablename__ = 'environment_instances'
 
     id = Column(Integer, primary_key=True)
@@ -68,6 +77,7 @@ class EnvironmentInstance(Base):
 
 # ---------------- JOURNEY / PATHS / PATHVERSIONS ---------------- #
 class Journey(Base):
+    """Top-level grouping of paths; identified by unique `name`."""
     __tablename__ = 'journeys'
 
     name = Column(String, unique=True, nullable=False, primary_key=True)
@@ -78,6 +88,7 @@ class Journey(Base):
     )
 
 class Path(Base):
+    """A path within a `Journey`; may have multiple versions and results."""
     __tablename__ = 'paths'
 
     id = Column(Integer, primary_key=True)
@@ -92,6 +103,7 @@ class Path(Base):
     )
 
 class PathVersion(Base):
+    """Immutable version of a path implementation (by file path)."""
     __tablename__ = 'path_versions'
 
     id = Column(Integer, primary_key=True)
@@ -106,6 +118,7 @@ class PathVersion(Base):
     )
 
 class PathResult(Base):
+    """A materialized result for a specific `PathVersion` and env instances."""
     __tablename__ = 'path_results'
 
     id = Column(Integer, primary_key=True)

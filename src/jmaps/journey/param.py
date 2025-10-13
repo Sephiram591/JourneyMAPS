@@ -1,3 +1,8 @@
+"""Parameter abstractions for journeys.
+
+Defines `JParam` and typed wrappers used to distinguish how values participate
+in optimization and configuration.
+"""
 from enum import Enum
 import copy
 
@@ -7,6 +12,11 @@ class ParamType(Enum):
     OPT = 'OPT'
     LAMBDA = 'LAMBDA'
 class JParam:
+    """Lightweight wrapper adding type semantics to parameter values.
+
+    Operators delegate to the underlying `value` to behave like the wrapped
+    object, while retaining metadata in `type`.
+    """
     def __init__(self, value, jtype: ParamType):
         '''
         JParam is a class that represents a parameter used in a journey.

@@ -1,3 +1,8 @@
+"""Environment containers for named parameter sets.
+
+`JEnv` wraps a mapping of parameter names to `JParam` with helpers for
+filtering by semantic type and extracting hashable values used for caching.
+"""
 from jmaps.journey.param import JParam, ParamType
 
 class JEnv(dict[str, JParam]):

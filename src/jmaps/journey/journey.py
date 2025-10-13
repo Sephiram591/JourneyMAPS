@@ -1,3 +1,8 @@
+"""Journey orchestration and caching.
+
+Provides the `Journey` class for composing paths, validating dependencies,
+running subpaths, caching results, and evaluating/pondering outputs.
+"""
 from typing import Union, Any
 from jmaps.config import PATH
 from jmaps.journey.path import JPath, JBatch
@@ -10,13 +15,15 @@ import hashlib
 import dill
 
 def get_cache_filepath(envs: dict[str, JEnv], cache_dir: Path):
-    '''Gets the cache filepath for a given set of JEnvs. Crops the envs to the env_names of the Path.
+    """Compute a deterministic cache filename from environment values.
+
     Args:
-        envs: dict[str, JEnv]
-        cache_dir: Path
+        envs: Mapping of env name to `JEnv`.
+        cache_dir: Directory where cache files are stored.
+
     Returns:
-        cache_filepath: Path
-    '''
+        Path to a `.dill` file uniquely representing the env values.
+    """
     hashable = {name: env.get_hashable_values() for name, env in envs.items()}
     dumped = dill.dumps(hashable, protocol=dill.HIGHEST_PROTOCOL)
     key = hashlib.sha256(dumped).hexdigest()
@@ -24,6 +31,11 @@ def get_cache_filepath(envs: dict[str, JEnv], cache_dir: Path):
     return cache_filepath
 
 class Journey:
+    """Executable container for environments and paths.
+
+    Manages validation, caching, dependency execution, and convenience helpers
+    for running and introspecting complex multi-step processes.
+    """
     def __init__(self, name, envs: Union[dict[str, JEnv], list[JEnv]] | None = None, paths: Union[dict[str, JPath], list[JPath]] | None = None, parent_cache_dir: Path | None = None):
         '''
         Journey is a class that represents a journey.

@@ -1,8 +1,17 @@
+"""Abstract path definitions for journeys.
+
+Defines `JPath` and batching helpers used by the `Journey` execution engine.
+"""
 from abc import ABC, abstractmethod
 from jmaps.journey.environment import JEnv
 from typing import Any
 
 class JBatch(dict[str, list[JEnv]]):
+    """A collection of named runs for batched subpath execution.
+
+    Keys are batch IDs; values are lists of `JEnv` required to run a subpath
+    once. A shared schema is validated across runs to ensure type consistency.
+    """
     def __init__(self, runs: dict[str, list[JEnv]] | None = None, env_schema: dict[str, dict[str, type]] | None = None):
         '''Initializes a JBatch.
         Args:

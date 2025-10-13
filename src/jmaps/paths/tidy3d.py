@@ -1,3 +1,10 @@
+"""Tidy3D-backed path utilities.
+
+This module provides a `JPath` implementation that integrates with `gplugins`
+and `tidy3d` to generate photonic components, run simulations (either via the
+default GDS modeler or custom FDTD parameters), and visualize results.
+
+"""
 from abc import abstractmethod
 from jmaps.journey.path import JPath
 from jmaps.journey.environment import JEnv
@@ -9,6 +16,12 @@ import tidy3d as td
 from typing import Any
 
 class GDS_Tidy3DPath(JPath):
+    """A `JPath` that creates a component, then simulates it with Tidy3D.
+
+    Subclasses may optionally override `get_component`
+    and `batch_modeler` to define how components are generated and how batches
+    of simulations are formed.
+    """
     def __init__(self, custom_fdtd=None, custom_modeler=None, delete_server_data=True):
         ''' Initialize the GDS_Tidy3DPath.
         Args:

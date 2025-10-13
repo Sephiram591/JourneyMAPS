@@ -42,24 +42,6 @@ Utilities
 Detailed Module Documentation
 -----------------------------
 
-Core Configuration
-~~~~~~~~~~~~~~~~~~
-
-.. automodule:: jmaps.config
-   :noindex:
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-TPE Step Module
-~~~~~~~~~~~~~~~
-
-.. automodule:: jmaps.tpe_step
-   :noindex:
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 Journey Module
 ~~~~~~~~~~~~~~
 
@@ -109,6 +91,24 @@ Tidy3D Path Module
 ~~~~~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.paths.tidy3d
+   :noindex:
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Core Configuration
+~~~~~~~~~~~~~~~~~~
+
+.. automodule:: jmaps.config
+   :noindex:
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+TPE Step Module
+~~~~~~~~~~~~~~~
+
+.. automodule:: jmaps.tpe_step
    :noindex:
    :members:
    :undoc-members:

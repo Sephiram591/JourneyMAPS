@@ -3,17 +3,6 @@ API Reference
 
 This page provides comprehensive documentation for all modules in the JourneyMAPS package.
 
-Core Modules
-------------
-
-.. autosummary::
-   :toctree: generated
-   :recursive:
-
-   jmaps
-   jmaps.config
-   jmaps.tpe_step
-
 Journey Package
 ---------------
 
@@ -23,7 +12,6 @@ The journey package contains the core functionality for automated parameter sear
    :toctree: generated
    :recursive:
 
-   jmaps.journey
    jmaps.journey.journey
    jmaps.journey.path
    jmaps.journey.environment
@@ -39,8 +27,17 @@ The paths package contains implementations for different potential paths.
    :toctree: generated
    :recursive:
 
-   jmaps.paths
    jmaps.paths.tidy3d
+
+Utilities
+------------
+
+.. autosummary::
+   :toctree: generated
+   :recursive:
+
+   jmaps.config
+   jmaps.tpe_step
 
 Detailed Module Documentation
 -----------------------------

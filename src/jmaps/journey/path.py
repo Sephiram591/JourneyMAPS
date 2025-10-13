@@ -138,9 +138,6 @@ class JPath(ABC):
         result = self._run(safe_envs, subpath_results, verbose)
         return result
 
-# class JBatchedPath(JPath):
-#     '''JBatchPath is a subclass of JPath that allows for batch runs of subpaths.'''
-    # @abstractmethod
     def subpath_batches(self, envs: dict[str, JEnv], subpath_results_singles: dict[str, Any]) -> dict[str, JBatch] | None:
         """If this path requires multiple runs of a subpath, this method should be overridden to return a dictionary describing how to update the environments for each time the subpath is run.
         Note that the version of subpath_results_singles WILL NOT contain any results from batch runs.
@@ -154,7 +151,6 @@ class JPath(ABC):
         """
         return None
 
-    # @abstractmethod
     @property
     def subpath_batch_envs(self) -> dict[str, set[str]] | None:
         """If this path requires multiple runs of a subpath, this method should be overridden to return a dictionary describing which environments are used in the batch runs of the subpath.

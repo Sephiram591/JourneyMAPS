@@ -32,24 +32,30 @@ class GDS_Tidy3DPath(JPath):
         self.custom_fdtd = custom_fdtd
         self.custom_modeler = custom_modeler
         self.delete_server_data = delete_server_data
+    
+    @property
+    def name(self) -> str:
+        """Unique name of the path"""
+        return "gds_tidy3d"
+
     @property
     def env_names(self) -> list[str]:
         """List of required environment names for all subclasses."""
         env_reqs = ['component', 'modeler', 'gds_component', 'gds_args']
         env_reqs.extend([self.custom_modeler] if self.custom_modeler else [])
         env_reqs.extend([self.custom_fdtd] if self.custom_fdtd else [])
-        env_reqs.extend(self._env_names)
+        # env_reqs.extend(self._env_names)
         return env_reqs
 
-    @property
-    @abstractmethod
-    def _env_names(self) -> list[str]:
-        """List of environment names that are required by the subclass"""
-        pass
+    # @property
+    # @abstractmethod
+    # def _env_names(self) -> list[str]:
+    #     """List of environment names that are required by the subclass"""
+    #     pass
 
     def get_component(self, envs: dict[str, JEnv], subpath_results: dict[str, Any], batch_i: int=0):
         '''Override this method to return the component of the path.'''
-        return envs['gds_component'](**envs['gds_args'])
+        return envs['gds_component']['c'](**envs['gds_args'])
     
     def batch_modeler(self, envs: dict[str, JEnv], subpath_results: dict[str, Any]) -> list[dict[str, Any]]:
         '''Override this method to return a list of modeler parameters that form a batch of simulations that are run by this path. 

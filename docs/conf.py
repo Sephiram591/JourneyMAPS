@@ -42,6 +42,10 @@ master_doc = "index"
 
 autodoc_mock_imports = [
     "pmag",
+    "tidy3d",
+    "gplugins",
+    "gdstk",
+    "sqlalchemy",
 ]
 
 # Autodoc configuration

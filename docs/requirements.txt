@@ -1,11 +1,7 @@
 sphinx>=7
 sphinx-rtd-theme>=2
 myst-parser>=2
-sqlalchemy
 sortedcontainers
 dill
 numpy>=1.19.5
 matplotlib
-gplugins
-tidy3d
-gdstk

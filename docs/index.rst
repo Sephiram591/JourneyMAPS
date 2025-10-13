@@ -5,7 +5,7 @@ JourneyMAPS (Journey - A Multistep Automated Parameter Search Package) is a Pyth
 
 The package provides:
 
-* **Journey Package**: Core functionality for automated parameter search and optimization
+* **Journey Framework**: Core functionality for automated parameter search and optimization
 * **Paths Package**: Implementations of specific paths (e.g., Tidy3D)
 
 Contents

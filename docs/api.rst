@@ -49,6 +49,7 @@ Core Configuration
 ~~~~~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.config
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -57,6 +58,7 @@ TPE Step Module
 ~~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.tpe_step
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -65,6 +67,7 @@ Journey Module
 ~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.journey.journey
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -73,6 +76,7 @@ Path Module
 ~~~~~~~~~~~
 
 .. automodule:: jmaps.journey.path
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -81,6 +85,7 @@ Environment Module
 ~~~~~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.journey.environment
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -89,6 +94,7 @@ Parameter Module
 ~~~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.journey.param
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -97,6 +103,7 @@ JMALC Module
 ~~~~~~~~~~~~
 
 .. automodule:: jmaps.journey.jmalc
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -105,6 +112,7 @@ Tidy3D Path Module
 ~~~~~~~~~~~~~~~~~~
 
 .. automodule:: jmaps.paths.tidy3d
+   :noindex:
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,12 +1,12 @@
-Welcome to jmaps's documentation!
+Welcome to JourneyMAPS's documentation!
 =================================
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
-
+   Home <self>
    installation
-   api/index
+   api
 
 Indices and tables
 ==================

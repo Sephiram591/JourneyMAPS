@@ -12,6 +12,5 @@ Contents
 --------
 
 .. toctree::
-   :maxdepth: 20
    installation
    api

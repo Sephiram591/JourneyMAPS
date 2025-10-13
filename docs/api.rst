@@ -1,4 +1,4 @@
-API Reference
+API Referencesdfasfasdf
 =============
 
 This page provides comprehensive documentation for all modules in the JourneyMAPS package.
@@ -17,7 +17,7 @@ Core Modules
 Journey Package
 ---------------
 
-The journey package contains the core functionality for automated parameter search.
+The journey package contains the core functionality for automated parameter search, and database functionality.
 
 .. autosummary::
    :toctree: generated
@@ -33,7 +33,7 @@ The journey package contains the core functionality for automated parameter sear
 Paths Package
 -------------
 
-The paths package contains implementations for different simulation backends.
+The paths package contains implementations for different potential paths.
 
 .. autosummary::
    :toctree: generated

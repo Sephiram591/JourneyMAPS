@@ -6,15 +6,12 @@ JourneyMAPS (Journey - A Multistep Automated Parameter Search Package) is a Pyth
 The package provides:
 
 * **Journey Package**: Core functionality for automated parameter search and optimization
-* **Paths Package**: Implementations for different simulation backends (e.g., Tidy3D)
-* **Configuration Management**: Centralized configuration handling
-* **TPE Integration**: Tree-structured Parzen Estimator for efficient hyperparameter optimization
-
+* **Paths Package**: Implementations of specific paths (e.g., Tidy3D)
 Contents
 --------
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 20
    
    installation
    api

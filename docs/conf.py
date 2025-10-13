@@ -38,14 +38,14 @@ html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 
 # Global navigation configuration
-# html_sidebars = {
-#     '**': [
-#         'globaltoc.html',
-#         'relations.html',
-#         'sourcelink.html',
-#         'searchbox.html',
-#     ]
-# }
+html_sidebars = {
+    '**': [
+        'globaltoc.html',
+        'relations.html',
+        'sourcelink.html',
+        'searchbox.html',
+    ]
+}
 
 master_doc = "index"
 

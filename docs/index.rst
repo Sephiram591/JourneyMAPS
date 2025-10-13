@@ -8,6 +8,7 @@ and simulation workflows. It is used most effectively as an ideologically consis
 any experiment, simulation, or optimization problem. Thus, regardless of whether you are running photonics simulations, quantum experiments,
 machine learning, or any other type of problem, your notebooks will have an elegant format for legibility and reproducibility. 
 Jmaps will be particularly useful where any of the following are true:
+
 - Many steps are required to complete the problem
 - Many parameters are involved (which might include timestamps), some of which may be dependent on other parameters or on results from other steps
 - You want to optimize over an arbitrary subset of the parameters (not yet implemented)

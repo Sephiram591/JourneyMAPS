@@ -26,9 +26,9 @@ The following index includes all public classes, functions, and modules in ``jma
    jmaps.journey.path
    jmaps.journey.param
    jmaps.journey.environment
-   jmaps.journey.jmalc
    jmaps.paths
    jmaps.paths.tidy3d
+   jmaps.config
 
 Indices and tables
 ------------------

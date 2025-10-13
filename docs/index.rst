@@ -2,7 +2,6 @@ Welcome to JourneyMAPS's documentation!
 =================================
 
 .. toctree::
-   Home <self>
    installation
    api
 

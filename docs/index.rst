@@ -9,12 +9,6 @@ any experiment, simulation, or optimization problem. Thus, regardless of whether
 machine learning, or any other type of problem, your notebooks will have an elegant format for legibility and reproducibility. 
 Jmaps will be particularly useful where any of the following are true:
 
-- Many steps are required to complete the problem
-- Many parameters are involved (which might include timestamps), some of which may be dependent on other parameters or on results from other steps
-- You want to optimize over an arbitrary subset of the parameters (not yet implemented)
-- It is important to save and retrieve previous results, and even better if this is done automatically in the background
-- It is important to view the parameters spaces that have been explored, and quickly retrieve previous results from a location in that space (not yet implemented)
-
 Journeys (class Journey)
 ========================
 

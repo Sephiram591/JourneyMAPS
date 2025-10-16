@@ -262,20 +262,20 @@ class Journey:
         return cached_env_names
         
 
-    def pack_for_path(self, path_name: str, force_run: bool=False, use_cache: bool=True, verbose: bool=False, force_subpath_run: bool=False):
+    def pack_for_path(self, path_name: str, force_run: bool=False, use_cache: bool=True, verbose: bool=False, force_subpath_run: bool=False, get_batches=False):
         """Packs your backpack to set out on a path! Returns whatever you need to run the path, but if you've done it already, returns the results of the path.
         Note that this will run subpaths required by the path, including batched subpaths.
         
         Args:
             path_name (str): The name of the path to run.
-            force_run (bool): Whether to force the path to run even if the environments match a cached result.
+            force_run (bool): Whether to pack the backpack for running even if the environments match a cached result.
             use_cache (bool): If false, the results will not be loaded or saved to the cache.
             verbose (bool): Whether to print verbose output.
             force_subpath_run (bool): Whether to force the subpaths to run even if their results match a cached result.
-        
+            get_batches (bool): If true, runs the normal subpaths and returns the batches that will be run.
         Returns:
             backpack (dict[str, Any]): A dictionary containing whatever you need from the path.
-            If the path has been run, the items are:
+            If the path has been run, and force_run is False, the items are:
             'result': The result of the path.
             'subpath_results': The results of the subpaths.
             'cache_filepath': The filepath to the cache file.
@@ -284,12 +284,19 @@ class Journey:
             'subpath_results': The results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the results for each batch id.
             'subpath_files': The file paths that contain the results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the file paths for each batch id.
             'cache_filepath': The filepath to the cache file.
+            If get_batches is True, the items are:
+            'subpath_batches': The batches that will be run.
         """
         if path_name not in self.paths:
             raise ValueError(f"Path {path_name} not found in Journey {self.name}")
         self.validate_path(path_name, error=True)
+        if get_batches:
+            force_run = True
         
         # Get the environments that are used in the path and its subpaths
+        # Load result, subpath_results, and cache_filepath, default to None if not found
+        result, subpath_results = (None, None)
+        cache_filepath = None
         if use_cache:
             cache_dir = self.parent_cache_dir / path_name
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -298,11 +305,9 @@ class Journey:
             cached_envs = {name: env for name, env in self.envs.items() if name in cached_env_names}
             cache_filepath = get_cache_filepath(cached_envs, cache_dir)
 
-            # Load the results from cache if possible
-            result, subpath_results = (None, None) if force_run else self.load_path_results(cache_filepath, subpath_exists_error=False)
-        else:
-            result, subpath_results = (None, None)
-            cache_filepath = None
+            # Load the results from cache
+            if not force_run:
+                result, subpath_results = self.load_path_results(cache_filepath, subpath_exists_error=False)
 
         if result is not None:
             # Pack the backpack!
@@ -332,6 +337,11 @@ class Journey:
             if self.paths[path_name].subpath_batch_envs is not None:
                 subpath_results_singles = copy.copy(subpath_results)
                 subpath_batches = self.paths[path_name].subpath_batches(safe_envs_stripped, subpath_results_singles)
+                if get_batches:
+                    backpack = {
+                        'subpath_batches': subpath_batches
+                    }
+                    return backpack
                 for subpath_name, sp_batch in subpath_batches.items():
                     subpath_results[subpath_name] = {}
                     subpath_files[subpath_name] = {}
@@ -355,6 +365,27 @@ class Journey:
             print(f"Packed for new {path_name} run to: {cache_filepath}")
             return backpack
 
+    def pack_for_batch(self, parent_path_name: str, batch_path_name: str, batch_id: str, use_cache: bool=True, verbose: bool=False, force_subpath_run: bool=False):
+        """Packs your backpack to set out on a batchedpath! Returns whatever you need to run the path, but if you've done it already, returns the results of the path.
+        Note that this will run subpaths required by the path, including batched subpaths.
+        
+        Args:
+            parent_path_name (str): The name of the parent path that is using the batch.
+            batch_path_name (str): The name of the path to pack for.
+            batch_id (str): The id of the batch to pack for.
+            use_cache (bool): If false, the results will not be loaded or saved to the cache.
+            verbose (bool): Whether to print verbose output.
+            force_subpath_run (bool): Whether to force the subpaths to run even if their results match a cached result.
+        
+        Returns:
+            backpack (dict[str, Any]): A dictionary containing whatever you need from the path.
+        """
+        parent_batch_backpack = self.pack_for_path(parent_path_name, use_cache=use_cache, verbose=verbose, force_subpath_run=force_subpath_run, get_batches=True)
+        self.update_envs(parent_batch_backpack['subpath_batches'][batch_path_name][batch_id])
+        backpack = self.pack_for_path(batch_path_name, force_run=True, use_cache=use_cache, verbose=verbose, force_subpath_run=force_subpath_run)
+        backpack['safe_envs_stripped'] = copy.deepcopy(backpack['safe_envs_stripped'])
+        self.revert_envs()
+        return backpack
 
     def update_envs(self, new_envs: dict[str, JEnv]|list[JEnv]):
         """Updates the environments in the journey. Saves the old environment references to last_envs.

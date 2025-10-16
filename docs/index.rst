@@ -12,8 +12,8 @@ Jmaps will be particularly useful where any of the following are true:
 
 - Many steps (Paths) are required to complete the problem
 - Many parameters determine the result of running a Path. Those parameters might include:
-  - Timestamps (such as when an optical alignment is performed)
-  - Values that depend on results from other Paths (such as a locking frequency for a laser based on a measurement of a resonance)
+   - Timestamps (such as when an optical alignment is performed)
+   - Values that depend on results from other Paths (such as a locking frequency for a laser based on a measurement of a resonance)
 - It is important to automatically save and retrieve previous Path results based on their parameter values
 - It is important to view all parameter sets that have been used to run a Path (in case you forget or want to see what you've done), and retrieve data for an individual run (not yet implemented)
 - You want to optimize over an arbitrary subset of the parameters (not yet implemented)

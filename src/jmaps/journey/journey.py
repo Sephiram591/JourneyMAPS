@@ -378,7 +378,11 @@ class Journey:
             force_subpath_run (bool): Whether to force the subpaths to run even if their results match a cached result.
         
         Returns:
-            backpack (dict[str, Any]): A dictionary containing whatever you need from the path.
+            backpack (dict[str, Any]): A dictionary containing:
+            'safe_envs_stripped': The environments needed by the path.
+            'subpath_results': The results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the results for each batch id.
+            'subpath_files': The file paths that contain the results of the subpaths. For each subpath run with a batch, the value will be a nested dictionary of the file paths for each batch id.
+            'cache_filepath': The filepath to the cache file.
         """
         parent_batch_backpack = self.pack_for_path(parent_path_name, use_cache=use_cache, verbose=verbose, force_subpath_run=force_subpath_run, get_batches=True)
         self.update_envs(parent_batch_backpack['subpath_batches'][batch_path_name][batch_id])

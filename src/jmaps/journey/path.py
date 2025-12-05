@@ -67,6 +67,7 @@ class JPath(ABC):
     If you want to view the results of the Path conveniently, you should override the ponder method.
     If you want to optimize the environments of the Path using JMaps, you must override the evaluate method.
     '''
+    subpath_tqdm = False
     @property
     @abstractmethod
     def name(self) -> str:

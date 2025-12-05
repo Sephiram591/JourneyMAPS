@@ -3,6 +3,9 @@ JourneyMAPS Documentation
 
 Journey - A Multistep Automated Parameter Search Library
 --------------------------------------------------------
+A single journey can be life changing. However, tens or hundreds of them get overwhelming pretty quickly.  
+This package is meant to generalize the pipeline for the completion of any parameter search (or Journey),  
+to make embarking on and completing many Journeys feasible.
 
 JourneyMAPS (Journey - A Multistep Automated Parameter Search Package) is a Python package designed for automated parameter optimization 
 and simulation workflows. It is used most effectively as an ideologically consistent framework for you to build jupyter-notebooks for 
@@ -15,7 +18,7 @@ Jmaps will be particularly useful where any of the following are true:
 
    - Timestamps (such as when an optical alignment is performed)
    - Values that depend on results from other Paths (such as a locking frequency for a laser based on a measurement of a resonance)
-   
+
 - It is important to automatically save and retrieve previous Path results based on their parameter values
 - It is important to view all parameter sets that have been used to run a Path (in case you forget or want to see what you've done), and retrieve data for an individual run (not yet implemented)
 - You want to optimize over an arbitrary subset of the parameters (not yet implemented)
@@ -25,9 +28,6 @@ Below, we describe the core concepts of Jmaps.
 Journeys (class Journey)
 ========================
 
-A single journey can be life changing. However, tens or hundreds of them get overwhelming pretty quickly.  
-This package is meant to generalize the pipeline for the completion of any parameter search (or Journey),  
-to make embarking on and completing many Journeys feasible.
 
 Paths (class JPath)
 ===================

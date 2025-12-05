@@ -29,3 +29,7 @@ class JEnv(dict[str, JParam]):
     def get_types(self, types: list[ParamType]=[ParamType.SET, ParamType.VAR, ParamType.OPT, ParamType.LAMBDA]):
         """Returns a dictionary of all JParam.type objects."""
         return {name: type(param) for name, param in self.get_values(types=types).items()}
+    def reset_lambdas(self):
+        """Resets the values of all lambda parameters in the environment."""
+        for param in self.get_params(types=[ParamType.LAMBDA]):
+            param.reset_value()

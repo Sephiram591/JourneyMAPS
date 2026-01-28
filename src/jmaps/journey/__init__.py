@@ -27,3 +27,4 @@ from jmaps.journey.journey import *
 from jmaps.journey.path import *
 from jmaps.journey.environment import *
 from jmaps.journey.param import *
+from jmaps.journey.serial import *

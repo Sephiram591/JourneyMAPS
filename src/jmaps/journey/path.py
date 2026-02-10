@@ -87,6 +87,7 @@ class JPath(ABC, BaseModel):
     If you want to optimize the environments of the Path using JMaps, you must override the evaluate method.
     '''
     name: str = Field(..., description="Unique name of the path")
+    changelog: str|None = Field(None, description="Description of the difference between the current path version and the last one. If this is the first version, simply describes the path.")
     save_datetime: bool = Field(False, description="Whether or not to save the time when the path is completed to the database.")
     subpaths: list[str] = Field(default_factory=set, description="List of subpath names which feed results into the path. Run in order.")
     batched_subpaths: set[str] = Field(default_factory=set, description="Set of subpath names have custom environments defined by this parent path.")

@@ -59,6 +59,7 @@ def create_tables(engine):
 class DBPath(Base):
     __tablename__ = "path"
     name = Column(String, primary_key=True)
+    description = Column(String, nullable=True)
     current_version = Column(Integer, nullable=True)
     versions = relationship("DBPathVersion", back_populates="path")
 
@@ -68,6 +69,7 @@ class DBPathVersion(Base):
 
     version = Column(Integer, primary_key=True)
     name = Column(String, ForeignKey('path.name'), primary_key=True, nullable=False)
+    changelog = Column(String, nullable=True)
 
     path = relationship("DBPath", back_populates="versions")
     results = relationship("DBResult", back_populates="path_version")

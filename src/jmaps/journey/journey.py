@@ -355,7 +355,7 @@ class Journey(BaseModel):
         path_stmt = select(DBPath).where(DBPath.name == path_name)
         path = session.execute(path_stmt).scalar_one_or_none()
         if path is None:
-            path = DBPath(name=path_name, current_version=None)
+            path = DBPath(name=path_name, current_version=None, description=self.paths[path_name].changelog)
             session.add(path)
             session.commit()
 
@@ -375,6 +375,7 @@ class Journey(BaseModel):
             # Create a new DBPath entry
             path_version = DBPathVersion(
                 name=path_name,
+                changelog=self.paths[path_name].changelog,
                 version=next_version,
                 env_schema=env_schema,
                 file_schema=file_schema

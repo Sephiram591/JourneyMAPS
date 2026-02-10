@@ -88,10 +88,10 @@ class DBResult(Base):
     path_version = relationship("DBPathVersion", back_populates="results")
     # Foreign key columns to PathVersion
     path_name = Column(String, nullable=False)
-    path_version = Column(Integer, nullable=False)
+    path_version_num = Column(Integer, nullable=False)
     __table_args__ = (
         ForeignKeyConstraint(
-            ['path_name', 'path_version'],
+            ['path_name', 'path_version_num'],
             ['path_version.name', 'path_version.version']
         ),
     )

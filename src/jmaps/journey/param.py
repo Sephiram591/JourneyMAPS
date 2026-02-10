@@ -40,7 +40,7 @@ class JParam(ABC, BaseModel):
         self.used = used
         for child in self._get_children():
             child.set_usage(used)
-    def init_run(self, is_parent_path:bool, parent_env:JParam|None=None):
+    def init_run(self, is_parent_path:bool, parent_env=None):
         parent_env = parent_env if parent_env is not None else self
         self._init_run(is_parent_path, parent_env)
         for child in self._get_children():
@@ -49,7 +49,7 @@ class JParam(ABC, BaseModel):
         self.used = self.used or mirror_param.used
         for self_child, mirror_child in zip(self._get_children(), mirror_param._get_children()):
             self_child.merge_usage(mirror_child)
-    def _init_run(self, is_parent_path:bool, parent_env:JParam):
+    def _init_run(self, is_parent_path:bool, parent_env):
         pass
     def get_value(self):
         self.used = True
@@ -123,7 +123,7 @@ class JDict(JParam):
         super().__init__(data=data, **kwargs)
     def keys(self):
         return self.data.keys()
-    def replace(self, other: JDict|dict):
+    def replace(self, other):
         other = wrap_jparam(other)
         if not isinstance(other, JDict):
             raise TypeError("Other is not a JDict, cannot replace.")

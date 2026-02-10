@@ -324,7 +324,7 @@ class Journey(BaseModel):
             
         result_stmt = select(DBResult).where(
             DBResult.path_name == path_name,
-            DBResult.path_version == path_version.version,
+            DBResult.path_version_num == path_version.version,
             DBResult.environment == temp_env,
             DBResult.created_at == Null(),
         )
@@ -388,7 +388,7 @@ class Journey(BaseModel):
                 environment=env_sql,
                 data=result.sql if result.sql is not None else Null(),
                 path_name=path_name,
-                path_version=path_version.version,
+                path_version_num=path_version.version,
                 file_path=str(file_path) if not isinstance(file_schema, Null) else Null(),
                 created_at=datetime.now(timezone.utc)
             )
@@ -396,7 +396,7 @@ class Journey(BaseModel):
         else:
             result_stmt = select(DBResult).where(
                 DBResult.path_name == path_name,
-                DBResult.path_version == path_version.version,
+                DBResult.path_version_num == path_version.version,
                 DBResult.environment == env_sql,
                 DBResult.created_at == Null(),
             )
@@ -406,7 +406,7 @@ class Journey(BaseModel):
                     environment=env_sql,
                     data=result.sql if result.sql is not None else Null(),
                     path_name=path_name,
-                    path_version=path_version.version,
+                    path_version_num=path_version.version,
                     file_path=str(file_path) if file_path is not None else Null(),
                     created_at=Null()
                 )

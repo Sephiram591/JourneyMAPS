@@ -146,6 +146,25 @@ class JDict(JParam):
             self.data[key].value = value
         else:
             self.data[key] = wrap_jparam(value)
+    
+    def __getattr__(self, key):
+        try:
+            super().__getattr__(key)
+        except AttributeError:
+            return self.data[key].get_value()
+
+    def __setattr__(self, key, value):
+        try:
+            super().__setattr__(key, value)
+        except ValueError:
+            if self._locked:
+                raise AttributeError(f"JDict is locked, parameters cannot be changed by the user.")
+            if not isinstance(key, str):
+                raise TypeError("JDict keys must be strings")
+            if key in self.data and isinstance(self.data[key], JValue) and not isinstance(value, JValue) and self.data[key].dtype is not None:
+                self.data[key].value = value
+            else:
+                self.data[key] = wrap_jparam(value)
     def items(self):
         for k, v in self.data.items():
             yield (k, v.get_value()) 

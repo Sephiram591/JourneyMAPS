@@ -45,7 +45,7 @@ class JParam(ABC, BaseModel):
         self._init_run(is_parent_path, parent_env)
         for child in self._get_children():
             child.init_run(is_parent_path, parent_env)
-    def merge_usage(self, mirror_param: JParam):
+    def merge_usage(self, mirror_param):
         self.used = self.used or mirror_param.used
         for self_child, mirror_child in zip(self._get_children(), mirror_param._get_children()):
             self_child.merge_usage(mirror_child)

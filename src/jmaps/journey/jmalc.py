@@ -1,134 +1,98 @@
-# """SQLAlchemy models for persisting journeys, paths, and results.
+import numpy as np
+from datetime import datetime
+from sqlalchemy import (TIMESTAMP, and_, or_, create_engine, event, 
+    case, cast, select, Column, ForeignKey, ForeignKeyConstraint, literal_column,
+    Integer, Float, DateTime, null,
+    String, Unicode, UnicodeText)
+from sqlalchemy import Computed
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.associationproxy import association_proxy
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import relationship, Session, object_session
+from sqlalchemy.orm.collections import attribute_keyed_dict
+from sqlalchemy.orm.interfaces import PropComparator
 
-# These ORM models allow storing environments and path results with relations
-# that capture versions and many-to-many associations.
-# """
-# from sqlalchemy import (
-#     Column, Integer, String, Float, Boolean, DateTime,
-#     ForeignKey, Table, Enum, UniqueConstraint, Text
-# )
-# from sqlalchemy.orm import declarative_base, relationship
-# import enum
 
-# Base = declarative_base()
+Base = declarative_base()
 
-# # ---------------- ENUM for Param Data Type ---------------- #
-# class DataType(enum.Enum):
-#     """Scalar data types supported by parameter persistence."""
-#     INT = "int"
-#     FLOAT = "float"
-#     STRING = "string"
-#     BOOL = "bool"
-#     DATETIME = "datetime"
+def get_sql_type(value):
+    if isinstance(value, bool):
+        return 'bool'
+    if np.issubdtype(type(value), np.floating):
+        return 'float'
+    if np.issubdtype(type(value), np.integer):
+        return 'int'
+    if isinstance(value, str):
+        return 'str'
+    if isinstance(value, datetime):
+        return 'datetime'
+    raise TypeError(f"Value: {value}, with type {type(value)} is not a valid type for sql (int, float, bool, str, datetime).")
 
-# # ---------------- Association Table for Many-to-Many ---------------- #
-# pathresult_environment_table = Table(
-#     'pathresult_environment', Base.metadata,
-#     Column('pathresult_id', Integer, ForeignKey('path_results.id'), primary_key=True),
-#     Column('environment_instance_id', Integer, ForeignKey('environment_instances.id'), primary_key=True)
-# )
+def cast_sql_type(value):
+    if isinstance(value, bool):
+        return value
+    if np.issubdtype(type(value), np.floating):
+        return float(value)
+    if np.issubdtype(type(value), np.integer):
+        return int(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.timestamp()
+    raise TypeError(f"Value: {value}, with type {type(value)} is not a valid type for sql (int, float, bool, str, datetime).")
 
-# # ---------------- PARAMS ---------------- #
-# class Param(Base):
-#     """A single parameter value belonging to an `EnvironmentInstance`."""
-#     __tablename__ = 'params'
+def get_sql_schema(sql_data):
+    schema = {}
+    for k, v in sql_data.items():
+        schema[k] = get_sql_type(v)
+    return schema
 
-#     id = Column(Integer, primary_key=True)
-#     name = Column(String, nullable=False)
-#     data_type = Column(Enum(DataType), nullable=False)
-#     int_value = Column(Integer)
-#     float_value = Column(Float)
-#     string_value = Column(String)
-#     bool_value = Column(Boolean)
-#     datetime_value = Column(DateTime)
 
-#     environment_instance_id = Column(Integer, ForeignKey('environment_instances.id'))
-#     environment_instance = relationship("EnvironmentInstance", back_populates="params")
+def create_tables(engine):
+    """Create all Journey cache tables (path, path_version, result).
+    Safe to call anytime: only creates tables that do not already exist (checkfirst=True).
+    """
+    Base.metadata.create_all(engine)
 
-#     __table_args__ = (
-#         UniqueConstraint('environment_instance_id', 'name', name='uq_param_name_per_env_instance'),
-#     )
 
-# # ---------------- ENVIRONMENT & ENVIRONMENT INSTANCES ---------------- #
-# class Environment(Base):
-#     """A named environment schema; has many `EnvironmentInstance`."""
-#     __tablename__ = 'environments'
+class DBPath(Base):
+    __tablename__ = "path"
+    name = Column(String, primary_key=True)
+    current_version = Column(Integer, nullable=True)
+    versions = relationship("DBPathVersion", back_populates="path")
 
-#     id = Column(Integer, primary_key=True)
-#     name = Column(String, unique=True, nullable=False)
 
-#     instances = relationship("EnvironmentInstance", back_populates="environment")
+class DBPathVersion(Base):
+    __tablename__ = "path_version"
 
-# class EnvironmentInstance(Base):
-#     """Concrete environment instance with parameter values and path links."""
-#     __tablename__ = 'environment_instances'
+    version = Column(Integer, primary_key=True)
+    name = Column(String, ForeignKey('path.name'), primary_key=True, nullable=False)
 
-#     id = Column(Integer, primary_key=True)
-#     environment_id = Column(Integer, ForeignKey('environments.id'))
-#     environment = relationship("Environment", back_populates="instances")
+    path = relationship("DBPath", back_populates="versions")
+    results = relationship("DBResult", back_populates="path_version")
+    env_schema = Column(JSONB, nullable=False)
+    file_schema = Column(JSONB, nullable=True)
 
-#     params = relationship("Param", back_populates="environment_instance", cascade="all, delete-orphan")
 
-#     path_results = relationship(
-#         "PathResult",
-#         secondary=pathresult_environment_table,
-#         back_populates="environment_instances"
-#     )
+class DBResult(Base):
+    __tablename__ = "result"
 
-# # ---------------- JOURNEY / PATHS / PATHVERSIONS ---------------- #
-# class Journey(Base):
-#     """Top-level grouping of paths; identified by unique `name`."""
-#     __tablename__ = 'journeys'
+    id = Column(Integer, primary_key=True)
+    environment = Column(JSONB, nullable=False)
+    data = Column(JSONB, nullable=True)
+    file_path = Column(String, nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=True)
 
-#     name = Column(String, unique=True, nullable=False, primary_key=True)
+    # Relationship back to PathVersion
+    path_version = relationship("DBPathVersion", back_populates="results")
+    # Foreign key columns to PathVersion
+    path_name = Column(String, nullable=False)
+    path_version = Column(Integer, nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['path_name', 'path_version'],
+            ['path_version.name', 'path_version.version']
+        ),
+    )
 
-#     paths = relationship("Path", back_populates="journey")
-#     __table_args__ = (
-#         UniqueConstraint('name', name='uq_journey_name'),
-#     )
-
-# class Path(Base):
-#     """A path within a `Journey`; may have multiple versions and results."""
-#     __tablename__ = 'paths'
-
-#     id = Column(Integer, primary_key=True)
-#     name = Column(String, nullable=False)
-
-#     journey_name = Column(String, ForeignKey('journeys.name'))
-#     journey = relationship("Journey", back_populates="paths")
-
-#     path_versions = relationship("PathVersion", back_populates="path")
-#     __table_args__ = (
-#         UniqueConstraint('journey_name', 'name', name='uq_path_name_per_journey'),
-#     )
-
-# class PathVersion(Base):
-#     """Immutable version of a path implementation (by file path)."""
-#     __tablename__ = 'path_versions'
-
-#     id = Column(Integer, primary_key=True)
-#     version_filepath = Column(Text, nullable=False)
-
-#     path_id = Column(Integer, ForeignKey('paths.id'))
-#     path = relationship("Path", back_populates="path_versions")
-
-#     path_results = relationship("PathResult", back_populates="path_version")
-#     __table_args__ = (
-#         UniqueConstraint('path_id', 'version_filepath', name='uq_path_version_filepath'),
-#     )
-
-# class PathResult(Base):
-#     """A materialized result for a specific `PathVersion` and env instances."""
-#     __tablename__ = 'path_results'
-
-#     id = Column(Integer, primary_key=True)
-#     result_filepath = Column(Text, nullable=False)
-
-#     path_version_id = Column(Integer, ForeignKey('path_versions.id'))
-#     path_version = relationship("PathVersion", back_populates="path_results")
-
-#     environment_instances = relationship(
-#         "EnvironmentInstance",
-#         secondary=pathresult_environment_table,
-#         back_populates="path_results"
-#     )

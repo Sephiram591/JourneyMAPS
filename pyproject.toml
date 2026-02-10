@@ -1,6 +1,6 @@
 [project]
 name = "jmaps"
-version = "0.0.0"
+version = "0.0.1"
 description = "Journey - A Multistep Automated Parameter Search Package"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -42,8 +42,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "numpy >= 1.19.5"
-  "sortedcontainers"
+  "numpy >= 1.19.5",
 ]
 
 [project.optional-dependencies]

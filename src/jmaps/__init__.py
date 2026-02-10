@@ -32,15 +32,6 @@ Description
 import platform
 import sys
 
-# from .models_old import Model  # noqa: F401
-
-if sys.version_info < (3, 9, 0):
-    raise Exception(
-        "dipole_farfield_tools requires Python 3.9+ (version "
-        + platform.python_version()
-        + " detected)."
-    )
-
 __version__ = "0.1.0"
 __license__ = "MIT"
 __project_url__ = "https://github.com/Sephiram591/JourneyMAPS"
@@ -48,6 +39,71 @@ __forum_url__ = "https://github.com/Sephiram591/JourneyMAPS"
 __trouble_url__ = __project_url__ + "/wiki/Troubleshooting-Guide"
 __website_url__ = "https://camacholab.byu.edu/"
 
-from jmaps.config import PATH
-from jmaps.journey import *
-from jmaps.tpe_step import *
+# Public facade: expose the Journey API at the package root
+from .config import PATH
+from .journey import (
+    Journey,
+    PathOptions,
+    get_filename,
+    JBatch,
+    JPath,
+    PathResult,
+    REF_SEP,
+    ResetCondition,
+    JParam,
+    JValue,
+    InvisibleParam,
+    JDict,
+    Buffer,
+    YBuffer,
+    XBuffer,
+    Refer,
+    wrap_jparam,
+    Base,
+    get_sql_type,
+    cast_sql_type,
+    get_sql_schema,
+    create_tables,
+    DBPath,
+    DBPathVersion,
+    DBResult,
+    # register,
+    # serialize_default,
+    # deserialize,
+    # serializable,
+    # deserializable,
+)
+
+__all__ = [
+    "PATH",
+    "Journey",
+    "PathOptions",
+    "get_filename",
+    "JBatch",
+    "JPath",
+    "PathResult",
+    "REF_SEP",
+    "ResetCondition",
+    "JParam",
+    "JValue",
+    "InvisibleParam",
+    "JDict",
+    "Buffer",
+    "YBuffer",
+    "XBuffer",
+    "Refer",
+    "wrap_jparam",
+    "Base",
+    "get_sql_type",
+    "cast_sql_type",
+    "get_sql_schema",
+    "create_tables",
+    "DBPath",
+    "DBPathVersion",
+    "DBResult",
+    "register",
+    "write",
+    "read",
+    "writable",
+    "readable",
+]

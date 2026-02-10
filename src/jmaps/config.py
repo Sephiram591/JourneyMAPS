@@ -19,12 +19,12 @@ class Paths:
         module (pathlib.Path): The path to the module.
         repo (pathlib.Path): The path to the repo.
         cwd (pathlib.Path): The path to the current working directory.
-        cache (pathlib.Path): The path to the cache.
+        journeys (pathlib.Path): The path to the journey storage directory.
     """
     module = module_path
     repo = repo_path
     cwd = cwd
-    cache = module / "cache"
+    journeys = module / "journeys"
 
 
 PATH = Paths()

@@ -89,6 +89,10 @@ class Journey(BaseModel):
     )
     env: JDict = Field(default_factory=JDict)
     paths: Dict[str, JPath] = Field(default_factory=dict)
+    cache_db_meta: bool = Field(True, description ='If true, does not query the database for the latest current_path_version, instead storing and retrieving it from the cache.')
+    db_current_path_versions: Dict[str, int] = Field(default_factory=dict)
+    db_current_path_env_schemas: Dict[str, dict] = Field(default_factory=dict)
+    db_current_path_file_schemas: Dict[str, dict] = Field(default_factory=dict)
     result_directory: Path = Field(
         ..., description="Directory where file-based results are stored."
     )
@@ -105,6 +109,7 @@ class Journey(BaseModel):
         env: JDict | None = None,
         paths: Union[dict[str, JPath], list[JPath]] | None = None,
         result_directory: Path | None = None,
+        cache_db_meta: bool= True
     ):
         """Initialize a :class:`Journey`.
 
@@ -123,7 +128,7 @@ class Journey(BaseModel):
         if isinstance(paths, list):
             paths = {path.name: path for path in paths}
         result_directory = (
-            result_directory if result_directory is not None else PATH.journeys / name
+            result_directory if result_directory is not None else PATH.data / name
         )
         result_directory.mkdir(parents=True, exist_ok=True)
 
@@ -144,10 +149,11 @@ class Journey(BaseModel):
             env=env if env is not None else JDict(data={}),
             paths=paths,
             result_directory=result_directory,
+            cache_db_meta=cache_db_meta
         )
 
-    def add_path(self, path: JPath, validate: bool = True):
-        """Add a single path to the journey.
+    def update_path(self, path: JPath, validate: bool = True):
+        """Updates a single path int the journey.
 
         Optionally validates that all environments and subpaths used by the path
         are defined in the journey.
@@ -162,8 +168,8 @@ class Journey(BaseModel):
         path_dir = self.result_directory / path.name
         path_dir.mkdir(parents=True, exist_ok=True)
 
-    def add_paths(self, new_paths: list[JPath], validate: bool = True):
-        """Add multiple paths to the journey.
+    def update_paths(self, new_paths: list[JPath], validate: bool = True):
+        """Update multiple paths in the journey.
 
         Args:
             new_paths: List of paths to add.
@@ -344,11 +350,13 @@ class Journey(BaseModel):
             result = self.load_path_results(local_env, path_name)
         if result is not None:
             if path_options.verbose:
-                print(f"Obtained prior result: {result}")
+                print(f"Loading {path_name}: {result}")
             # Don't load another recursion of subpaths if we are a subpath already.
             if not is_parent:
                 return result, None
-
+        else:
+            if path_options.verbose:
+                print(f"Running {path_name}.")
         subpath_options = path_options.model_copy()
         subpath_options.force_run_to_depth = (
             subpath_options.force_run_to_depth - 1
@@ -386,10 +394,10 @@ class Journey(BaseModel):
         subpath_results: dict[str, PathResult | dict[str, PathResult]] = {}
         # Run the subpaths, and retrieve the files their results are stored in.
         for subpath_name in self.paths[path_name].subpaths:
-            batches = self.paths[path_name].get_batches(
+            batch = self.paths[path_name].get_batch(
                 subpath_name, local_env, subpath_results
             )
-            if batches is None:
+            if batch is None:
                 subpath_env = local_env.model_copy(deep=True)
                 subpath_result, _ = self._run(
                     subpath_env, subpath_name, subpath_options, is_parent=False
@@ -401,12 +409,12 @@ class Journey(BaseModel):
                 # Iterate through each element of the batch.
                 if subpath_options.batch_tqdm:
                     enumerate_batch = tqdm(
-                        batches.items(),
-                        total=len(batches),
-                        desc=f"Running {subpath_name} batches",
+                        batch.items(),
+                        total=len(batch),
+                        desc=f"Running {subpath_name} batch",
                     )
                 else:
-                    enumerate_batch = batches.items()
+                    enumerate_batch = batch.items()
                 update_local_env = True
                 for batch_id, batch_env in enumerate_batch:
                     subpath_env = local_env.model_copy(deep=True)
@@ -439,19 +447,37 @@ class Journey(BaseModel):
         if self.paths[path_name].save_datetime:
             return None
         session = self.Session()
-        path_stmt = select(DBPath).where(DBPath.name == path_name)
-        path = session.execute(path_stmt).scalar_one_or_none()
-        if path is None or path.current_version is None:
-            return None
+        path_version_num = None
+        env_schema = None
+        if self.cache_db_meta and path_name in self.db_current_path_versions:
+            path_version_num = self.db_current_path_versions[path_name]
+        else:
+            path_stmt = select(DBPath).where(DBPath.name == path_name)
+            path = session.execute(path_stmt).scalar_one_or_none()
+            
+            if path is None:
+                return None
+            path_version_num = path.current_version
+            if self.cache_db_meta:
+                self.db_current_path_versions[path_name] = path_version_num
 
-        version_stmt = select(DBPathVersion).where(
-            DBPathVersion.name == path_name,
-            DBPathVersion.version == path.current_version,
-        )
-        path_version = session.execute(version_stmt).scalar_one_or_none()
-        if path_version is None:
-            return None
-        env_schema = path_version.env_schema
+        if self.cache_db_meta and path_name in self.db_current_path_env_schemas:
+            env_schema = self.db_current_path_env_schemas[path_name]
+            file_schema = self.db_current_path_file_schemas[path_name]
+        else:
+            path_version_num = path.current_version
+            version_stmt = select(DBPathVersion).where(
+                DBPathVersion.name == path_name,
+                DBPathVersion.version == path_version_num,
+            )
+            path_version = session.execute(version_stmt).scalar_one_or_none()
+            if path_version is None:
+                return None
+            env_schema = path_version.env_schema
+            file_schema = path_version.file_schema
+            if self.cache_db_meta:
+                self.db_current_path_env_schemas[path_name] = env_schema
+                self.db_current_path_file_schemas[path_name] = file_schema
         temp_env: dict[str, Any] = {}
         for param_used in env_schema.keys():
             param_path = param_used.split(REF_SEP)
@@ -464,10 +490,9 @@ class Journey(BaseModel):
             temp_env[param_used] = (
                 cast_sql_type(jparam) if dtype is None else dtype(jparam)
             )
-
         result_stmt = select(DBResult).where(
             DBResult.path_name == path_name,
-            DBResult.path_version_num == path_version.version,
+            DBResult.path_version_num == path_version_num,
             DBResult.environment == temp_env,
             DBResult.created_at == Null(),
         )
@@ -478,7 +503,7 @@ class Journey(BaseModel):
         result = PathResult(sql=db_result.data)
         result.from_file(
             Path(db_result.file_path) if db_result.file_path is not None else None,
-            path_version.file_schema,
+            file_schema,
         )
         return result
 
@@ -494,7 +519,7 @@ class Journey(BaseModel):
         env_sql = local_env.get_sql_data(show_unused=False, show_invisible=False)
         env_schema = get_sql_schema(env_sql)
 
-        file_path = self.result_directory / get_filename(env_sql)
+        file_path = self.result_directory / path_name / get_filename(env_sql)
         file_schema = result.to_file(file_path)
         file_schema = file_schema if file_schema is not None else Null()
         # Check if a DBPath already exists with this name.
@@ -508,7 +533,6 @@ class Journey(BaseModel):
             )
             session.add(path)
             session.commit()
-
         version_stmt = select(DBPathVersion).where(
             DBPathVersion.name == path_name,
             DBPathVersion.env_schema == env_schema,
@@ -536,14 +560,19 @@ class Journey(BaseModel):
             )
             session.add(path_version)
             session.commit()
-        path.current_version = path_version.version
+        path_version_num = path_version.version
+        path.current_version = path_version_num
+        if self.cache_db_meta:
+            self.db_current_path_versions[path_name] = path_version_num
+            self.db_current_path_env_schemas[path_name] = env_schema
+            self.db_current_path_file_schemas[path_name] = file_schema if not isinstance(file_schema, Null) else None
         # Add new DBResult entry, linking to the path_version.
         if self.paths[path_name].save_datetime:
             db_result = DBResult(
                 environment=env_sql,
                 data=result.sql if result.sql is not None else Null(),
                 path_name=path_name,
-                path_version_num=path_version.version,
+                path_version_num=path_version_num,
                 file_path=str(file_path) if not isinstance(file_schema, Null) else Null(),
                 created_at=datetime.now(timezone.utc),
             )
@@ -551,7 +580,7 @@ class Journey(BaseModel):
         else:
             result_stmt = select(DBResult).where(
                 DBResult.path_name == path_name,
-                DBResult.path_version_num == path_version.version,
+                DBResult.path_version_num == path_version_num,
                 DBResult.environment == env_sql,
                 DBResult.created_at == Null(),
             )
@@ -561,7 +590,7 @@ class Journey(BaseModel):
                     environment=env_sql,
                     data=result.sql if result.sql is not None else Null(),
                     path_name=path_name,
-                    path_version_num=path_version.version,
+                    path_version_num=path_version_num,
                     file_path=str(file_path) if file_path is not None else Null(),
                     created_at=Null(),
                 )

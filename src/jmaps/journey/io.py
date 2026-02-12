@@ -31,7 +31,7 @@ def register(
     _READERS[cls] = reader
 
 
-def write(obj: Any, file_path: Path) -> type:
+def write(obj: Any, file_path: Path) -> str:
     """Write an object to disk using the best registered writer.
 
     Resolution walks the method-resolution-order (MRO) of ``type(obj)`` so that
@@ -47,31 +47,33 @@ def write(obj: Any, file_path: Path) -> type:
     Raises:
         TypeError: If no writer is registered for the object's type or its parents.
     """
-    cls = type(obj)
-
+    root_cls = type(obj)
+    writer_cls = type(obj)
     try:
-        fn = _RESOLVED_WRITERS[cls]
+        writer_cls = _RESOLVED_WRITERS[f"{root_cls.__module__}.{root_cls.__qualname__}"]
+        fn = _WRITERS[f"{writer_cls.__module__}.{writer_cls.__qualname__}"]
     except KeyError:
-        for typ in cls.__mro__:
-            if typ in _WRITERS:
-                fn = _WRITERS[typ]
-                _RESOLVED_WRITERS[cls] = fn
-                cls = typ
+        for typ in root_cls.__mro__:
+            if f"{typ.__module__}.{typ.__qualname__}" in _WRITERS:
+                fn = _WRITERS[f"{typ.__module__}.{typ.__qualname__}"]
+                _RESOLVED_WRITERS[f"{root_cls.__module__}.{root_cls.__qualname__}"] = typ
+                writer_cls = typ
                 break
         else:
             raise TypeError(
-                f"No writer registered for {cls!r} or its parent classes"
+                f"No writer registered for {root_cls!r} or its parent classes {root_cls.__mro__}"
             )
 
-    fn(obj, file_path)
-    return cls
+    module_path = fn(obj, file_path)
+    return [f"{writer_cls.__module__}.{writer_cls.__qualname__}", f"{root_cls.__module__}.{root_cls.__qualname__}"]
 
 
-def read(cls: type, file_path: Path) -> Any:
+def read(writer_cls: str, root_cls: str, file_path: Path) -> Any:
     """Read an object of the given type from disk.
 
     Args:
-        cls: Type to read.
+        writer_cls: Type to access the reader.
+        root_cls: Type of the object returned
         file_path: Path to the source file.
 
     Returns:
@@ -81,10 +83,10 @@ def read(cls: type, file_path: Path) -> Any:
         TypeError: If no reader is registered for ``cls``.
     """
     try:
-        fn = _READERS[cls]
+        fn = _READERS[writer_cls]
     except KeyError:
-        raise TypeError(f"No reader registered for {cls!r}")
-    return fn(file_path)
+        raise TypeError(f"No reader registered for {writer_cls!r}")
+    return fn(root_cls, file_path)
 
 
 def writable(cls: type):
@@ -100,7 +102,7 @@ def writable(cls: type):
     """
 
     def decorator(writer_fn: Callable[[Any, Path], None]):
-        _WRITERS[cls] = writer_fn
+        _WRITERS[f"{cls.__module__}.{cls.__qualname__}"] = writer_fn
         return writer_fn
 
     return decorator
@@ -120,7 +122,7 @@ def readable(cls: type):
     """
 
     def decorator(reader_fn: Callable[[Path], Any]):
-        _READERS[cls] = reader_fn
+        _READERS[f"{cls.__module__}.{cls.__qualname__}"] = reader_fn
         return reader_fn
 
     return decorator

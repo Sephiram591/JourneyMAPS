@@ -1,5 +1,5 @@
 # Jmaps cache
-src/jmaps/cache/
+src/jmaps/data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

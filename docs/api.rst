@@ -14,9 +14,9 @@ The journey package contains the core functionality for automated parameter sear
 
    jmaps.journey.journey
    jmaps.journey.path
-   jmaps.journey.environment
    jmaps.journey.param
    jmaps.journey.jmalc
+   jmaps.journey.io
 
 Paths Package
 -------------

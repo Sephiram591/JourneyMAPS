@@ -24,7 +24,7 @@ class Paths:
     module = module_path
     repo = repo_path
     cwd = cwd
-    journeys = module / "journeys"
+    data = module / "data"
 
 
 PATH = Paths()

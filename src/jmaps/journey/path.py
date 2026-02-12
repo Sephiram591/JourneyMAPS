@@ -67,7 +67,7 @@ class PathResult(BaseModel):
             return
         self.file = {}
         for k, v in file_schema.items():
-            self.file[k] = read(v, file_path.with_name(file_path.name + "_" + k))
+            self.file[k] = read(v[0], v[1], file_path.with_name(file_path.name + "_" + k))
 
 
 class JBatch(dict[str, JDict]):
@@ -223,7 +223,7 @@ class JPath(ABC, BaseModel):
 
         return result
 
-    def get_batches(
+    def get_batch(
         self, subpath_name: str, env: JDict, previous_subpath_results: dict[str, Any]
     ) -> JBatch | None:
         """Describe batched executions required for a subpath.

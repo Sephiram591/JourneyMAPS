@@ -205,10 +205,7 @@ If no parent has a registered writer, a TypeError will be raised.
 
 Importing the module that defines the handlers will register the handlers with the registry.
 
-Registering a handler with decorators
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-You can register a type with the decorators :func:`~jmaps.journey.io.writable` and :func:`~jmaps.journey.io.readable`.
+You can register your own types with the decorators :func:`~jmaps.io.writable` and :func:`~jmaps.io.readable`.
 The writer function must accept ``(obj, file_path)``; the reader must accept ``(root_cls, file_path)`` and return the
 deserialized object. root_cls is the fully qualified name of the class that was saved, in case the true class is a subclass of the writer class.
 

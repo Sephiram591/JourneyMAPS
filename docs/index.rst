@@ -74,4 +74,5 @@ Contents
 .. toctree::
    Home <self>
    installation
+   tutorial
    api

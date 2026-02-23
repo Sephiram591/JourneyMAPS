@@ -194,15 +194,14 @@ If the type does not have a registered writer, it will loop through all parent t
 and use the registered writer for the first parent that has a registered writer. 
 If no parent has a registered writer, a TypeError will be raised.
 
-How it is used
-~~~~~~~~~~~~~~
-:mod:`jmaps.io` contains some default handlers for common types:
+:mod:`jmaps.io` contains some default handlers for common types:  
+
 - **Generic pickle** in :mod:`jmaps.io.jpickle`: registers ``object`` so any
   pickleable value can go in ``result.file``. Useful when you don't need
-  cross-language or human-readable format.
+  cross-language or human-readable format.  
 - **Tidy3D objects** in :mod:`jmaps.io.jtidy3d`: registers
   ``tidy3d.components.base.Tidy3dBaseModel`` and uses ``.to_file`` / ``.from_file``
-  with HDF5.
+  with HDF5.  
 
 Importing the module that defines the handlers will register the handlers with the registry.
 

@@ -29,6 +29,7 @@ Path results will be saved according to the parameters that were used in the pat
 - **JValue**: Leaf parameter that holds a concrete Python value (with an optional explicit dtype). 
 
 Here is an example environment:
+
 .. code-block:: python
 
    from datetime import datetime, timezone
@@ -187,7 +188,7 @@ Using the IO Registry
 
 When a path returns a :class:`~jmaps.journey.path.PathResult` with a non-empty
 ``file`` dict, the Journey saves each value to disk and records *how* it was
-saved so it can be loaded later. The **IO registry** (:mod:`jmaps.journey.io`)
+saved so it can be loaded later. The **IO registry** (:mod:`jmaps.io`)
 maps Python types to writer and reader callables. When an object needs saved,
 the registry will look up the object's type and use the registered writer to save it. 
 If the type does not have a registered writer, it will loop through all parent types 

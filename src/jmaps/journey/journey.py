@@ -318,7 +318,7 @@ class Journey(BaseModel):
         session = Session(bind=self.engine)
         return session
     def _run(
-        self, local_env: JDict, path_name: str, path_options: PathOptions, is_parent: bool = False, session: Session|None = None
+        self, local_env: JDict, path_name: str, path_options: PathOptions, is_parent: bool = False, session=None
     ):
         """Core implementation for running a path and its subpaths.
 
@@ -378,7 +378,7 @@ class Journey(BaseModel):
 
 
     def run_subpaths(
-        self, local_env: JDict, path_name: str, subpath_options: PathOptions, session: Session | None
+        self, local_env: JDict, path_name: str, subpath_options: PathOptions, session: Session
     ):
         """Run all subpaths required by ``path_name`` (including batched ones).
 

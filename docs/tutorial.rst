@@ -53,7 +53,8 @@ Here is an example environment:
    print(env["x"]) # This will print the current time in UTC
    print(env["y"]) # This will print the linspace array [1, 2, 3, 4, 5]
    print(env["i"]["oranges"]) # This will print the integer 4
-   print(env.get_sql_data(show_unused=False, show_invisible=False)) # This will return a json compatible dictionary with 'a', 'r', 'x', and 'y' keys, but not 'o', 'l', or 'i' (i is invisible).
+   print(env.get_sql_data(show_unused=False, show_invisible=False)) # This will return a json compatible dictionary with 'a', 'r', 'x', and 'y' keys, but not 'o', 'l', or 'i' (i is invisible)
+   
    
 Toying around with the show_unused and show_invisible flags can give you a better understanding of how the environment works.
 

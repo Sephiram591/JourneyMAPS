@@ -85,9 +85,10 @@ and the get_batch method must be overridden to define the jm.JBatch of environme
 for the subpath. A subpath without batches will be run with the same environment as the parent path.
 
 Below, ``PowerSweepPath`` sweeps the parameter ``o`` from 1 to 10 and stores the results of the ``PowerPath`` as a file. 
-:mod:`jmaps.io.jpickle` is used to pickle the results of the ``PowerPath`` to a file (see "Using the IO Registry" in the documentation).
+:mod:`jmaps.io.jpickle` is used to pickle the results of the ``PowerPath`` to a file (see "Using the IO Registry" in the tutorial).
 
 .. code-block:: python
+
    from jmaps.io import jpickle
    class PowerSweepPath(jm.JPath):
       name:str='power_sweep'
@@ -104,7 +105,7 @@ Below, ``PowerSweepPath`` sweeps the parameter ``o`` from 1 to 10 and stores the
                file={"xs":xs, "ys":ys},
                sql=None
          )
-      def get_batch(self, subpath_name, env: jm.JDict, previous_subpath_results: dict[str, Any]) -> jm.JBatch | None: # This method is used to define the batch of environments for power path.
+      def get_batch(self, subpath_name, env: jm.JDict, previous_subpath_results: dict[str, Any]): # This method is used to define the batch of environments for power path.
          batch = None # If no batch is needed, return None.
          match subpath_name:
             case 'power':
@@ -112,7 +113,6 @@ Below, ``PowerSweepPath`` sweeps the parameter ``o`` from 1 to 10 and stores the
                for p in np.linspace(1, 10, 11):
                   batch.add_run(str(p), {'o':p})
          return batch
-
 
 
 Constructing and Inspecting a Journey
@@ -125,14 +125,14 @@ database; here we use a placeholder connection string:
 .. code-block:: python
 
    engine = "postgresql+psycopg://USERNAME:PASSWORD@HOST:5432/DBNAME"
-   journey = jm.Journey("Test", db_engine_arg=engine, cache_db_meta=True)
-   journey.update_path(PowerPath())
+   journey = jm.Journey(db_engine_arg=engine, paths=[PowerPath()], result_directory=None)
    journey.update_path(PowerSweepPath())
 
    print(journey)
    # Journey(Test)
    # Paths:
    #    power
+   #    power_sweep
 
 Running Paths and Using ``PathOptions``
 ---------------------------------------
@@ -162,11 +162,11 @@ executed and whether cached results are reused:
    result, subpath_results = journey.run(env, "power_sweep", force_0)
    print(result.file)         # {"xs": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], "ys": [1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121]}
 
-Why is the force_run_to_depth=1 necessary? If you change the structure of _run or get_batch for a path,
+Why is ``force_run_to_depth=1`` necessary? If you change the structure of ``_run`` or ``get_batch`` for a path,
 the results of the path will be different than the cached results. This is because the schema of the path 
 has changed, and the cached results will not be compatible with the new schema. Schemas are recomputed every
-time a path is run without loading from the cache. Thus, if you change the structure of _run or get_batch for a path,
-you must set force_run_to_depth=1 to ensure that the results of the path are re-computed and the schema is updated.
+time a path is run without loading from the database. Thus, if you change the structure of ``_run`` or ``get_batch`` for a path,
+you must set ``force_run_to_depth=1`` to ensure that the results of the path are re-computed rather than loaded and the schema is updated.
 
 Note that if you run a path with a subpath that has changed, you will want to set force_run_to_depth=2 to ensure that the subpath is re-computed and the schema is updated.
 And if that subpath has a subpath that has changed, you will want to set force_run_to_depth=3 to ensure that the subpath is re-computed and the schema is updated. 
@@ -182,11 +182,54 @@ to store path definitions, versions, and results. The lower part of
 ``journey_test.ipynb`` shows how to inspect these tables directly with a
 SQLAlchemy session.
 
-Where to Go Next
-----------------
+Using the IO Registry
+---------------------
 
-- Explore ``param_test.ipynb`` to see more advanced parameter-tree behaviors
-  (usage tracking, invisible parameters, and SQL export options).
-- Use the patterns above to build your own environments and paths, then register
-  them on a ``Journey`` and scale up to more complex, batched workflows.
+When a path returns a :class:`~jmaps.journey.path.PathResult` with a non-empty
+``file`` dict, the Journey saves each value to disk and records *how* it was
+saved so it can be loaded later. The **IO registry** (:mod:`jmaps.journey.io`)
+maps Python types to writer and reader callables. When an object needs saved,
+the registry will look up the object's type and use the registered writer to save it. 
+If the type does not have a registered writer, it will loop through all parent types 
+and use the registered writer for the first parent that has a registered writer. 
+If no parent has a registered writer, a TypeError will be raised.
+
+How it is used
+~~~~~~~~~~~~~~
+:mod:`jmaps.io` contains some default handlers for common types:
+- **Generic pickle** in :mod:`jmaps.io.jpickle`: registers ``object`` so any
+  pickleable value can go in ``result.file``. Useful when you don't need
+  cross-language or human-readable format.
+- **Tidy3D objects** in :mod:`jmaps.io.jtidy3d`: registers
+  ``tidy3d.components.base.Tidy3dBaseModel`` and uses ``.to_file`` / ``.from_file``
+  with HDF5.
+
+Importing the module that defines the handlers will register the handlers with the registry.
+
+Registering a handler with decorators
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You can register a type with the decorators :func:`~jmaps.journey.io.writable` and :func:`~jmaps.journey.io.readable`.
+The writer function must accept ``(obj, file_path)``; the reader must accept ``(root_cls, file_path)`` and return the
+deserialized object. root_cls is the fully qualified name of the class that was saved, in case the true class is a subclass of the writer class.
+
+Example: NumPy arrays as `.npy` files (using the decorators, which the registry uses for lookup):
+
+.. code-block:: python
+
+   import numpy as np
+   from pathlib import Path
+   from jmaps.journey.io import writable, readable
+
+   @writable(np.ndarray)
+   def _write_ndarray(obj: np.ndarray, file_path: Path):
+       np.save(file_path.with_suffix(".npy"), obj)
+
+   @readable(np.ndarray)
+   def _read_ndarray(root_cls: str, file_path: Path):
+       return np.load(file_path.with_suffix(".npy"))
+
+After writing this, import the module/run the cell that defines the handlers. Now you can use
+``result.file["key"] = np.array([1, 2, 3])`` in a path and it will be
+saved/loaded automatically!
 

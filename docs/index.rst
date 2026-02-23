@@ -40,23 +40,28 @@ lead to refining the parameters. In JMaps, these are called **Paths**. For a Pat
 - **evaluate**: Determine the Figure of Merit (FoM) of your parameters for this Path.  
   This could be efficiency, loss, accuracy, or more.
 
-Environments (class JEnv)
-=========================
+Environments (using ``JDict``)
+==============================
 
 Paths will often share some parameters, and have their own parameters.  
 The group of all parameters that share the same set of Paths is called an **Environment**.  
+In code, environments are represented by :class:`jmaps.journey.param.JDict`, a tree of parameters.
 All parameters in a Journey are sorted into Environments.
 
-Parameters (class JParams, with children JVar, JSet, JOpt)
-==========================================================
+Parameters (``JParam`` tree)
+============================
 
-Parameters have a value and a type. The three types are:
+Parameters are represented as a tree of :class:`jmaps.journey.param.JParam` objects.
+The most common building blocks are:
 
-- **Variable (JVar)**: Will be changed by optimizers operating on a Path.
-- **Settings (JSet)**: Unchanged by optimizers, but affect the result of the Journey.
-- **Options (JOpt)**: Unchanged by optimizers, and don't affect the result of any Path on the Journey.  
-  These are parameters such as ``plot=True`` and ``verbose=False``. Any JParams of this type will  
-  be ignored when looking up or saving the Path results.
+- **JValue**: Leaf parameter that holds a concrete Python value (with an optional explicit dtype).
+- **JDict**: Dictionary of named child parameters, typically used as the top-level environment.
+- **Buffer / XBuffer / YBuffer**: Cached values that can reset based on a :class:`ResetCondition`.
+- **InvisibleParam**: Wrapper that hides parameters from SQL exports by default.
+- **Refer**: Reference to another parameter elsewhere in the environment tree.
+
+Together these let you define rich, nested environments that can be locked during path execution,
+tracked for usage, and exported to SQL-friendly structures for caching.
 
 The package provides:
 

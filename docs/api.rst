@@ -60,19 +60,19 @@ Path Module
    :undoc-members:
    :show-inheritance:
 
-Environment Module
-~~~~~~~~~~~~~~~~~~
+Parameter Module
+~~~~~~~~~~~~~~~~
 
-.. automodule:: jmaps.journey.environment
+.. automodule:: jmaps.journey.param
    :noindex:
    :members:
    :undoc-members:
    :show-inheritance:
 
-Parameter Module
-~~~~~~~~~~~~~~~~
+IO Module
+~~~~~~~~~
 
-.. automodule:: jmaps.journey.param
+.. automodule:: jmaps.journey.io
    :noindex:
    :members:
    :undoc-members:

@@ -58,6 +58,7 @@ autodoc_mock_imports = [
     "dill",
     "numpy",
     "matplotlib",
+    "pydantic",
 ]
 
 # Autodoc configuration

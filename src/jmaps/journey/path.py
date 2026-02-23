@@ -82,6 +82,7 @@ class JBatch(dict[str, JDict]):
         self,
         runs: dict[str, JDict] | None = None,
         param_schema: dict[str, type] | None = None,
+        use_multiple_processes: bool = False
     ):
         """Initialize a :class:`JBatch`.
 
@@ -91,6 +92,7 @@ class JBatch(dict[str, JDict]):
                 the schema is inferred from the first added run.
         """
         self.param_schema = param_schema
+        self.use_multiple_processes = use_multiple_processes
         super().__init__()
         if runs is not None:
             for batch_id, env in runs.items():

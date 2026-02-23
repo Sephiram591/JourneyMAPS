@@ -32,4 +32,4 @@ def tidy3d_writer(obj: td.components.base.Tidy3dBaseModel, file_path: Path) -> N
 @readable(td.components.base.Tidy3dBaseModel)
 def tidy3d_reader(root_cls:str, file_path: Path) -> Any:
     """Read any Python object using pickle."""
-    return load_module(root_cls).from_file(str(file_path.with_suffix(".hdf5")))
+    return load_object(root_cls).from_file(str(file_path.with_suffix(".hdf5")))

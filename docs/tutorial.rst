@@ -10,13 +10,15 @@ All examples use the recommended import:
 .. code-block:: python
 
    import jmaps as jm
+   from jmaps.io import jpickle
+   
+:mod:`jmaps.io.jpickle` is used to pickle the file results of arbitrary types to a file (see "Using the IO Registry" in the tutorial).
 
 Defining an Environment with ``JDict``
 --------------------------------------
 
 The first step is to define an **environment**: a tree of parameters that are used by paths. Environments are represented by
- :class:`jmaps.journey.param.JDict`. This class acts mostly as a python dictionary 
-(indexed by strings, you can even use \*\*jdict to unpack a dictionary into the JDict).
+ :class:`jmaps.journey.param.JDict`. This class acts mostly as a python dictionary (indexed by strings, you can even use \*\*jdict to unpack a dictionary into the JDict).
 However, when you access a parameter in the JDict, it will be marked as used! By this,
 JourneyMAPS can track which parameters are used by which paths, and which are not.
 Path results will be saved according to the parameters that were used in the path.
@@ -85,12 +87,10 @@ the batched_subpaths attribute can be used to specify which subpaths are batched
 and the get_batch method must be overridden to define the jm.JBatch of environments 
 for the subpath. A subpath without batches will be run with the same environment as the parent path.
 
-Below, ``PowerSweepPath`` sweeps the parameter ``o`` from 1 to 10 and stores the results of the ``PowerPath`` as a file. 
-:mod:`jmaps.io.jpickle` is used to pickle the results of the ``PowerPath`` to a file (see "Using the IO Registry" in the tutorial).
+Below, ``PowerSweepPath`` sweeps the parameter ``o`` from 1 to 10 and stores the results of the ``PowerPath`` as a file.
 
 .. code-block:: python
 
-   from jmaps.io import jpickle
    class PowerSweepPath(jm.JPath):
       name:str='power_sweep'
       changelog:str|None = 'Sweeps o from 1 to 10'

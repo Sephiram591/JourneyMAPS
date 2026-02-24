@@ -8,26 +8,13 @@ This package is meant to generalize the pipeline for the completion of any param
 to make embarking on and completing many Journeys feasible.
 
 JourneyMAPS (Journey - A Multistep Automated Parameter Search Package) is a Python package designed for automated parameter optimization 
-and simulation workflows. It is used most effectively as an ideologically consistent framework for you to build jupyter-notebooks for 
-any experiment, simulation, or optimization problem. Thus, regardless of whether you are running photonics simulations, quantum experiments,
-machine learning, or any other type of problem, your notebooks will have an elegant format for legibility and reproducibility. 
-Jmaps will be particularly useful where any of the following are true:
-
-- Many steps (Paths) are required to complete the problem
-- Many parameters determine the result of running a Path. Those parameters might include:
-
-   - Timestamps (such as when an optical alignment is performed)
-   - Values that depend on results from other Paths (such as a locking frequency for a laser based on a measurement of a resonance)
-
-- It is important to automatically save and retrieve previous Path results based on their parameter values
-- It is important to view all parameter sets that have been used to run a Path (in case you forget or want to see what you've done), and retrieve data for an individual run (not yet implemented)
-- You want to optimize over an arbitrary subset of the parameters (not yet implemented)
+and simulation workflows. It avoids repetitious computation by saving all results by their input parameter values to a database, 
+loading relevant results automatically from the database or from automatically saved files. It is used most effectively as an 
+ideologically consistent framework for you to build jupyter-notebooks for any experiment, simulation, or optimization problem. 
+Thus, regardless of whether you are running photonics simulations, quantum experiments, machine learning, or any other type of 
+problem, your notebooks will have an elegant format for legibility and reproducibility. 
 
 Below, we describe the core concepts of Jmaps.
-
-Journeys (class Journey)
-========================
-
 
 Paths (class JPath)
 ===================
@@ -36,15 +23,23 @@ In any given Journey (parameter search), you often have multiple steps, processe
 lead to refining the parameters. In JMaps, these are called **Paths**. For a Path, one must often:
 
 - **run**: Do the step, process, or simulation
-- **ponder**: Look at graphs, visuals, and tables
-- **evaluate**: Determine the Figure of Merit (FoM) of your parameters for this Path.  
-  This could be efficiency, loss, accuracy, or more.
+- **plot**: Look at graphs, visuals, and tables
+- **update environment**: Update the environment based on relevant results from the Path
+
+When the path is deterministic (not dependent on time or randomness), results will be automatically
+
+Journeys (class Journey)
+========================
+
+A Journey is a container for a set of Paths. It is used to define the overall problem, and to run the Paths in a consistent 
+manner. Often a large experiment will be broken down into multiple steps 
+(such as: initial simulation, alignment, validation experiment, data analysis).
 
 Environments (using ``JDict``)
 ==============================
 
-Paths will often share some parameters, and have their own parameters.  
-The group of all parameters that share the same set of Paths is called an **Environment**.  
+Paths will often share some parameters, and have their own parameters. Environments automatically track parameter usage,
+such that only the parameters that are used by a Path are saved to the database for a given path result
 In code, environments are represented by :class:`jmaps.journey.param.JDict`, a tree of parameters.
 All parameters in a Journey are sorted into Environments.
 
@@ -54,19 +49,21 @@ Parameters (``JParam`` tree)
 Parameters are represented as a tree of :class:`jmaps.journey.param.JParam` objects.
 The most common building blocks are:
 
-- **JValue**: Leaf parameter that holds a concrete Python value (with an optional explicit dtype).
 - **JDict**: Dictionary of named child parameters, typically used as the top-level environment.
-- **Buffer / XBuffer / YBuffer**: Cached values that can reset based on a :class:`ResetCondition`.
+- **XBuffer / YBuffer**: Functions/classes that are evaluated when accessed, or retreived from a cache of their previous evaluation. The cache can reset based on a :class:`ResetCondition`. XBuffers save only only the output of the function to the database, while YBuffers save only input.
 - **InvisibleParam**: Wrapper that hides parameters from SQL exports by default.
 - **Refer**: Reference to another parameter elsewhere in the environment tree.
+- **JValue**: Leaf parameter that holds a concrete Python value (with an optional explicit dtype). 
 
-Together these let you define rich, nested environments that can be locked during path execution,
-tracked for usage, and exported to SQL-friendly structures for caching.
+
+Together these let you define rich, nested environments that are tracked for usage and exported to SQL-friendly 
+structures for saving and loading results.
 
 The package provides:
 
 * **Journey Framework**: Core functionality for automated parameter search and optimization
 * **Paths Package**: Implementations of specific paths (e.g., Tidy3D)
+* **IO Package**: Functions for saving and loading results to and from files. Useful for large results, or results that are not easily serializable to JSONB.
 
 Contents
 --------

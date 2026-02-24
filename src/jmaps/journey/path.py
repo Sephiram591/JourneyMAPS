@@ -14,7 +14,13 @@ from pydantic import BaseModel, Field
 from jmaps.journey.io import read, write
 from jmaps.journey.jmalc import get_sql_schema
 from jmaps.journey.param import JDict, wrap_jparam
+from enum import Enum
 
+class ExecutionType(Enum):
+    """Type of path result."""
+    SINGLE_PROCESS = "single_process"
+    MULTIPLE_PROCESSES = "multiple_processes"
+    MULTIPLE_THREADS = "multiple_threads"
 
 class PathResult(BaseModel):
     """Container for the results of a path execution.
@@ -81,18 +87,15 @@ class JBatch(dict[str, JDict]):
     def __init__(
         self,
         runs: dict[str, JDict] | None = None,
-        param_schema: dict[str, type] | None = None,
-        use_multiple_processes: bool = False
+        execution_type: ExecutionType = ExecutionType.SINGLE_PROCESS
     ):
         """Initialize a :class:`JBatch`.
 
         Args:
             runs: Optional mapping from batch ID to environment.
-            param_schema: Optional pre-computed parameter schema. If omitted,
-                the schema is inferred from the first added run.
         """
-        self.param_schema = param_schema
-        self.use_multiple_processes = use_multiple_processes
+        self.param_schema = None
+        self.execution_type = execution_type
         super().__init__()
         if runs is not None:
             for batch_id, env in runs.items():
@@ -243,11 +246,3 @@ class JPath(ABC, BaseModel):
             only a single run is required.
         """
         return None
-
-    def to_file(self, file_result, file_path: Path):
-        """Optional hook to customize how path-level file results are written."""
-        pass
-
-    def from_file(self, file_path: Path):
-        """Optional hook to customize how path-level file results are read."""
-        pass

@@ -14,7 +14,7 @@ import json
 
 from pydantic import BaseModel, Field
 from tqdm import tqdm
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from sqlalchemy import select, Null, create_engine
 from sqlalchemy.engine import Engine
 
@@ -27,7 +27,7 @@ from jmaps.journey.jmalc import (
     DBPathVersion,
     DBResult,
 )
-from jmaps.journey.path import JPath, JBatch, PathResult
+from jmaps.journey.path import JPath, JBatch, PathResult, ExecutionType
 from jmaps.journey.param import REF_SEP, JDict
 class PathOptions(BaseModel):
     """Runtime options controlling path execution and caching."""
@@ -49,13 +49,8 @@ class PathOptions(BaseModel):
     plot: bool = Field(True, description="Whether to plot results after running.")
     verbose: bool = Field(False, description="Whether to print verbose output.")
     batch_tqdm: bool = Field(
-        False, description="Track batch progress with tqdm when running subpaths."
+        True, description="Track batch progress with tqdm when running subpaths."
     )
-
-    # class Config:
-    #     extra = "forbid"
-    #     validate_assignment = True
-
 
 def get_filename(hashable: dict) -> str:
     """Compute a deterministic key from a JSON-serializable mapping.
@@ -80,13 +75,6 @@ class Journey(BaseModel):
     Manages validation, caching, dependency execution, and convenience helpers
     for running and introspecting complex multi-step processes.
     """
-
-    name: str = Field(
-        ...,
-        description=(
-            "Name describing the journey, encompassing all paths that will be run."
-        ),
-    )
     paths: Dict[str, JPath] = Field(default_factory=dict)
     db_engine_arg: str = Field(..., description='String for creating the SQLAlchemy engine for a postgres database')
     cache_db_meta: bool = Field(True, description ='If true, does not query the database for the latest current_path_version, instead storing and retrieving it from the cache.')
@@ -94,13 +82,13 @@ class Journey(BaseModel):
     db_current_path_env_schemas: Dict[str, dict] = Field(default_factory=dict)
     db_current_path_file_schemas: Dict[str, dict] = Field(default_factory=dict)
     engine: Any = Field(None, description='Stores the connection pool sqlalchemy engine')
+    session: Any = Field(None, description='Stores the sqlalchemy session')
     result_directory: Path = Field(
         ..., description="Directory where file-based results are stored."
     )
 
     def __init__(
         self,
-        name: str,
         db_engine_arg: str,
         paths: Union[dict[str, JPath], list[JPath]] | None = None,
         result_directory: Path | None = None,
@@ -123,7 +111,7 @@ class Journey(BaseModel):
         if isinstance(paths, list):
             paths = {path.name: path for path in paths}
         result_directory = (
-            result_directory if result_directory is not None else PATH.data / name
+            result_directory if result_directory is not None else PATH.data
         )
         result_directory.mkdir(parents=True, exist_ok=True)
 
@@ -132,7 +120,6 @@ class Journey(BaseModel):
             path_dir.mkdir(parents=True, exist_ok=True)
 
         super().__init__(
-            name=name,
             db_engine_arg=db_engine_arg,
             paths=paths,
             result_directory=result_directory,
@@ -296,29 +283,42 @@ class Journey(BaseModel):
             else:
                 print(error_string)
 
-    def run(self, env: JDict, path_name: str, path_options: PathOptions):
+    def run(self, env: JDict, path_name: str, path_options: PathOptions, update_env_usage: bool = True):
         """Run a named path using the Journey's root environment.
 
         Args:
             path_name: Name of the path to run.
             path_options: Execution and caching options.
-
+            session: SQLAlchemy session to use for the database.
+            update_env_usage: If True, the environment usage is updated with the usage of the path.
         Returns:
             tuple[PathResult, dict[str, Any] | None]: A tuple of the path result
             and subpath results.
         """
         if path_name not in self.paths:
             raise ValueError(f"The path '{path_name}' does not exist in this Journey")
-        return self._run(env.model_copy(deep=True), path_name, path_options, is_parent=True, session=None)
+        local_env = env.model_copy(deep=True)
+        result, subpath_results = self._run(local_env, path_name, path_options, is_parent=True)
+        if update_env_usage:
+            env.init_run(is_parent_path=True)
+            env.merge_usage(local_env)
+        return result, subpath_results
 
+    def init_session(self) -> Session:
+        if self.engine is None:
+            self.engine = create_engine(self.db_engine_arg)
+            create_tables(self.engine)
+        if self.session is None:
+            self.session = Session(bind=self.engine)
+        return self.session
+        
     def get_session(self) -> Session:
         if self.engine is None:
             self.engine = create_engine(self.db_engine_arg)
             create_tables(self.engine)
-        session = Session(bind=self.engine)
-        return session
+        return Session(bind=self.engine)
     def _run(
-        self, local_env: JDict, path_name: str, path_options: PathOptions, is_parent: bool = False, session=None
+        self, local_env: JDict, path_name: str, path_options: PathOptions, is_parent: bool = False
     ):
         """Core implementation for running a path and its subpaths.
 
@@ -338,12 +338,12 @@ class Journey(BaseModel):
         local_env.reset_usage()
         result: PathResult | None = None
         made_session = False
-        if session is None and not path_options.disable_saving_and_loading:
-            session = self.get_session()
+        if self.session is None and not path_options.disable_saving_and_loading:
+            self.init_session()
             made_session = True
         try:
             if path_options.force_run_to_depth == 0 and not path_options.disable_saving_and_loading:
-                result = self.load_path_results(local_env, path_name, session)
+                result = self.load_path_results(local_env, path_name)
             if result is not None:
                 if path_options.verbose:
                     print(f"Loading {path_name}: {result}")
@@ -359,7 +359,7 @@ class Journey(BaseModel):
                 if subpath_options.force_run_to_depth > 0
                 else 0
             )
-            subpath_results = self.run_subpaths(local_env, path_name, subpath_options, session)
+            subpath_results = self.run_subpaths(local_env, path_name, subpath_options)
             if result is None:
                 # Run the path.
                 result = self.paths[path_name].run(
@@ -367,18 +367,20 @@ class Journey(BaseModel):
                 )
                 # Save the results to cache.
                 if not path_options.disable_saving_and_loading:
-                    self.save_path_results(local_env, path_name, result, session)
+                    self.save_path_results(local_env, path_name, result)
             # Plot the path results.
             if path_options.plot:
                 self.paths[path_name].plot(result, subpath_results)
         finally:
             if made_session:
-                session.close()
+                self.session.commit()
+                self.session.close()
+                self.session = None
         return result, subpath_results
 
 
     def run_subpaths(
-        self, local_env: JDict, path_name: str, subpath_options: PathOptions, session: Session
+        self, local_env: JDict, path_name: str, subpath_options: PathOptions
     ):
         """Run all subpaths required by ``path_name`` (including batched ones).
 
@@ -400,57 +402,102 @@ class Journey(BaseModel):
             if batch is None:
                 subpath_env = local_env.model_copy(deep=True)
                 subpath_result, _ = self._run(
-                    subpath_env, subpath_name, subpath_options, is_parent=False, session=session
+                    subpath_env, subpath_name, subpath_options, is_parent=False
                 )
                 subpath_results[subpath_name] = subpath_result
                 local_env.merge_usage(subpath_env)
             else:
-                subpath_results[subpath_name] = {}
-                if batch.use_multiple_processes:
-                    with concurrent.futures.ProcessPoolExecutor() as executor:
-                        usage_tracking_batch = list(batch.keys())[0]
-                        journey_copy = self.model_copy()
-                        journey_copy.engine = None
-                        futures = [executor.submit(run_batch_id, journey_copy, local_env, subpath_name, subpath_options, batch_id, batch_env, batch_id==usage_tracking_batch)
-                                    for batch_id, batch_env in batch.items()]
-                        if subpath_options.batch_tqdm:
-                            enumerate_futures = tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Running {subpath_name} batch")
-                        else:
-                            enumerate_futures = concurrent.futures.as_completed(futures)
-                        for future in enumerate_futures:
-                            subpath_result, batch_id, subpath_env = future.result()
-                            if subpath_env is not None:
-                                local_env.merge_usage(subpath_env)
-                            subpath_results[subpath_name][batch_id] = subpath_result
-                else:
-                    # Iterate through each element of the batch sequentially.
-                    if subpath_options.batch_tqdm:
-                        enumerate_batch = tqdm(
-                            batch.items(),
-                            total=len(batch),
-                            desc=f"Running {subpath_name} batch",
-                        )
-                    else:
-                        enumerate_batch = batch.items()
-                    update_local_env = True
-                    for batch_id, batch_env in enumerate_batch:
-                        subpath_env = local_env.model_copy(deep=True)
-                        batch_env.init_run(is_parent_path=True, parent_env=subpath_env)
-                        subpath_env.replace(batch_env)
-                        subpath_result, _ = self._run(
-                            subpath_env, subpath_name, subpath_options, is_parent=False, session=session
-                        )
-                        # Update parameter usage according to subpath usage.
-                        if update_local_env:
-                            # These are dependent parameters, so don't count towards usage.
-                            batch_env.reset_usage()
-                            local_env.merge_usage(subpath_env)
-
-                        # Save the results of the subpath.
-                        subpath_results[subpath_name][batch_id] = subpath_result
+                subpath_results[subpath_name] = self.run_batch(local_env, subpath_name, batch, subpath_options)
         return subpath_results
 
-    def load_path_results(self, local_env: JDict, path_name: str, session: Session):
+    def run_batch(self, local_env: JDict, path_name: str, batch: JBatch | JDict, path_options: PathOptions):
+        """Run a batch of subpaths.
+
+        Args:
+            local_env: Environment to use for the parent path.
+            path_name: Name of the parent path.
+            batch: Batch of subpaths to run.
+            path_options: Execution options propagated to subpaths.
+            session: SQLAlchemy session to use for the database.
+
+        Returns:
+            dict[str, PathResult]: Mapping from batch ID to result.
+        """
+        single_run = False
+        if isinstance(batch, JDict):
+            batch = JBatch(runs={"default": batch})
+            single_run = True
+        batch_results = {}
+        match batch.execution_type:
+            case ExecutionType.MULTIPLE_PROCESSES:
+                with concurrent.futures.ProcessPoolExecutor() as executor:
+                    usage_tracking_batch = list(batch.keys())[0]
+                    journey_copy = self.model_copy(update={"engine": None, "session": None})
+                    futures = [executor.submit(run_batch_id, journey_copy, local_env, path_name, path_options, batch_id, batch_env, batch_id==usage_tracking_batch)
+                                for batch_id, batch_env in batch.items()]
+                    if path_options.batch_tqdm:
+                        enumerate_futures = tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Running {path_name} batch")
+                    else:
+                        enumerate_futures = concurrent.futures.as_completed(futures)
+                    for future in enumerate_futures:
+                        result, batch_id, usage_env = future.result()
+                        if usage_env is not None:
+                            local_env.merge_usage(usage_env)
+                        batch_results[batch_id] = result
+            
+            case ExecutionType.MULTIPLE_THREADS:
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    usage_tracking_batch = list(batch.keys())[0]
+                    session_maker = scoped_session(sessionmaker(bind=self.engine))
+                    futures = [executor.submit(
+                        run_batch_id, 
+                        self.model_copy(update={"engine": None, "session": None}), 
+                        local_env.model_copy(deep=True), 
+                        path_name, path_options, 
+                        batch_id, batch_env, batch_id==usage_tracking_batch, 
+                        session_maker=session_maker)
+                                for batch_id, batch_env in batch.items()]
+                    if path_options.batch_tqdm:
+                        enumerate_futures = tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Running {path_name} batch")
+                    else:
+                        enumerate_futures = concurrent.futures.as_completed(futures)
+                    for future in enumerate_futures:
+                        result, batch_id, usage_env = future.result()
+                        if usage_env is not None:
+                            local_env.merge_usage(usage_env)
+                        batch_results[batch_id] = result
+            
+            case ExecutionType.SINGLE_PROCESS:
+                # Iterate through each element of the batch sequentially.
+                if path_options.batch_tqdm:
+                    enumerate_batch = tqdm(
+                        batch.items(),
+                        total=len(batch),
+                        desc=f"Running {path_name} batch",
+                    )
+                else:
+                    enumerate_batch = batch.items()
+                update_local_env = True
+                for batch_id, batch_env in enumerate_batch:
+                    path_env = local_env.model_copy(deep=True)
+                    batch_env.init_run(is_parent_path=True, parent_env=path_env)
+                    path_env.replace(batch_env)
+                    result, _ = self._run(
+                        path_env, path_name, path_options, is_parent=False
+                    )
+                    # Update parameter usage according to subpath usage.
+                    if update_local_env:
+                        # These are dependent parameters, so don't count towards usage.
+                        batch_env.reset_usage()
+                        local_env.merge_usage(path_env)
+                        update_local_env = False
+
+                    # Save the results of the subpath.
+                    batch_results[batch_id] = result
+        if single_run:
+            batch_results = batch_results["default"]
+        return batch_results
+    def load_path_results(self, local_env: JDict, path_name: str):
         """Load results for a path from the cache, if available.
 
         Args:
@@ -469,7 +516,7 @@ class Journey(BaseModel):
             path_version_num = self.db_current_path_versions[path_name]
         else:
             path_stmt = select(DBPath).where(DBPath.name == path_name)
-            path = session.execute(path_stmt).scalar_one_or_none()
+            path = self.session.execute(path_stmt).scalar_one_or_none()
             
             if path is None:
                 return None
@@ -486,7 +533,7 @@ class Journey(BaseModel):
                 DBPathVersion.name == path_name,
                 DBPathVersion.version == path_version_num,
             )
-            path_version = session.execute(version_stmt).scalar_one_or_none()
+            path_version = self.session.execute(version_stmt).scalar_one_or_none()
             if path_version is None:
                 return None
             env_schema = path_version.env_schema
@@ -512,7 +559,7 @@ class Journey(BaseModel):
             DBResult.environment == temp_env,
             DBResult.created_at == Null(),
         )
-        db_result = session.execute(result_stmt).scalar_one_or_none()
+        db_result = self.session.execute(result_stmt).scalar_one_or_none()
         if db_result is None:
             local_env.reset_usage()
             return None
@@ -523,7 +570,7 @@ class Journey(BaseModel):
         )
         return result
 
-    def save_path_results(self, local_env: JDict, path_name: str, result: PathResult, session: Session):
+    def save_path_results(self, local_env: JDict, path_name: str, result: PathResult):
         """Persist the results of a path into the cache database.
 
         Args:
@@ -539,21 +586,21 @@ class Journey(BaseModel):
         file_schema = file_schema if file_schema is not None else Null()
         # Check if a DBPath already exists with this name.
         path_stmt = select(DBPath).where(DBPath.name == path_name)
-        path = session.execute(path_stmt).scalar_one_or_none()
+        path = self.session.execute(path_stmt).scalar_one_or_none()
         if path is None:
             path = DBPath(
                 name=path_name,
                 current_version=None,
                 description=self.paths[path_name].changelog,
             )
-            session.add(path)
-            session.commit()
+            self.session.add(path)
+            self.session.commit()
         version_stmt = select(DBPathVersion).where(
             DBPathVersion.name == path_name,
             DBPathVersion.env_schema == env_schema,
             DBPathVersion.file_schema == file_schema,
         )
-        path_version = session.execute(version_stmt).scalar_one_or_none()
+        path_version = self.session.execute(version_stmt).scalar_one_or_none()
 
         if path_version is None:
             # Find the latest version number for this path_name.
@@ -563,7 +610,7 @@ class Journey(BaseModel):
                 .order_by(DBPathVersion.version.desc())
                 .limit(1)
             )
-            max_version_result = session.execute(max_version_stmt).scalar_one_or_none()
+            max_version_result = self.session.execute(max_version_stmt).scalar_one_or_none()
             next_version = 0 if max_version_result is None else (max_version_result + 1)
             # Create a new DBPathVersion entry.
             path_version = DBPathVersion(
@@ -573,8 +620,8 @@ class Journey(BaseModel):
                 env_schema=env_schema,
                 file_schema=file_schema,
             )
-            session.add(path_version)
-            session.commit()
+            self.session.add(path_version)
+            self.session.commit()
         path_version_num = path_version.version
         path.current_version = path_version_num
         if self.cache_db_meta:
@@ -591,7 +638,7 @@ class Journey(BaseModel):
                 file_path=str(file_path) if not isinstance(file_schema, Null) else Null(),
                 created_at=datetime.now(timezone.utc),
             )
-            session.add(db_result)
+            self.session.add(db_result)
         else:
             result_stmt = select(DBResult).where(
                 DBResult.path_name == path_name,
@@ -599,7 +646,7 @@ class Journey(BaseModel):
                 DBResult.environment == env_sql,
                 DBResult.created_at == Null(),
             )
-            db_result = session.execute(result_stmt).scalar_one_or_none()
+            db_result = self.session.execute(result_stmt).scalar_one_or_none()
             if db_result is None:
                 db_result = DBResult(
                     environment=env_sql,
@@ -609,17 +656,17 @@ class Journey(BaseModel):
                     file_path=str(file_path) if file_path is not None else Null(),
                     created_at=Null(),
                 )
-                session.add(db_result)
+                self.session.add(db_result)
             else:
                 db_result.data = result.sql
                 db_result.file_path = str(file_path) if file_path is not None else None
-        session.commit()
+        # self.session.commit()
 
     # Overrides
     def get_str(self) -> str:
         """Return a human-readable string representation of the Journey."""
-        string = f"Journey({self.name})\n"
-        string += "Paths:\n"
+        # string = f"Journey({self.name})\n"
+        string = "Paths:\n"
         for path_name, path in self.paths.items():
             string += f"   {path_name}"
             if len(path.subpaths) > 0:
@@ -631,15 +678,23 @@ class Journey(BaseModel):
         return self.get_str()
 
 
-def run_batch_id(journey, subpath_env: JDict, subpath_name: str, subpath_options: PathOptions, batch_id:str, batch_env: JBatch, return_environment: bool):
+def run_batch_id(journey, subpath_env: JDict, subpath_name: str, subpath_options: PathOptions, batch_id:str, batch_env: JBatch, return_environment: bool, session_maker=None):
     # subpath_env = env.model_copy(deep=True)
+    if session_maker is not None:
+        journey.session = session_maker()
+        journey.engine = True
     batch_env.init_run(is_parent_path=True, parent_env=subpath_env) # Resolve any references
     subpath_env.replace(batch_env)
     subpath_result, _ = journey._run(
-        subpath_env, subpath_name, subpath_options, is_parent=False, session=None
+        subpath_env, subpath_name, subpath_options, is_parent=False
     )
     if return_environment:
         batch_env.reset_usage()
     else:
         subpath_env = None
+    if session_maker is not None:
+        journey.session.commit()
+        journey.session.close()
+        journey.session = None
+        journey.engine = None
     return subpath_result, batch_id, subpath_env

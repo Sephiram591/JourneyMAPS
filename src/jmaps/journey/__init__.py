@@ -24,7 +24,7 @@
 # SOFTWARE.
 
 from .journey import Journey, PathOptions, get_filename
-from .path import JBatch, JPath, PathResult
+from .path import JBatch, JPath, PathResult, ExecutionType
 from .param import (
     REF_SEP,
     ResetCondition,
@@ -64,6 +64,7 @@ __all__ = [
     "JBatch",
     "JPath",
     "PathResult",
+    "ExecutionType",
     "REF_SEP",
     "ResetCondition",
     "JParam",

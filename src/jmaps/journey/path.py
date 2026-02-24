@@ -87,7 +87,8 @@ class JBatch(dict[str, JDict]):
     def __init__(
         self,
         runs: dict[str, JDict] | None = None,
-        execution_type: ExecutionType = ExecutionType.SINGLE_PROCESS
+        execution_type: ExecutionType = ExecutionType.SINGLE_PROCESS,
+        max_workers: int | None = None
     ):
         """Initialize a :class:`JBatch`.
 
@@ -96,6 +97,7 @@ class JBatch(dict[str, JDict]):
         """
         self.param_schema = None
         self.execution_type = execution_type
+        self.max_workers = max_workers
         super().__init__()
         if runs is not None:
             for batch_id, env in runs.items():

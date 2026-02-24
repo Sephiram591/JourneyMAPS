@@ -430,7 +430,7 @@ class Journey(BaseModel):
         batch_results = {}
         match batch.execution_type:
             case ExecutionType.MULTIPLE_PROCESSES:
-                with concurrent.futures.ProcessPoolExecutor() as executor:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=batch.max_workers) as executor:
                     usage_tracking_batch = list(batch.keys())[0]
                     journey_copy = self.model_copy(update={"engine": None, "session": None})
                     futures = [executor.submit(run_batch_id, journey_copy, local_env, path_name, path_options, batch_id, batch_env, batch_id==usage_tracking_batch)
@@ -446,7 +446,7 @@ class Journey(BaseModel):
                         batch_results[batch_id] = result
             
             case ExecutionType.MULTIPLE_THREADS:
-                with concurrent.futures.ThreadPoolExecutor() as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=batch.max_workers) as executor:
                     usage_tracking_batch = list(batch.keys())[0]
                     session_maker = scoped_session(sessionmaker(bind=self.engine))
                     futures = [executor.submit(

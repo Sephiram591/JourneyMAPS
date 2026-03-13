@@ -74,6 +74,7 @@ from .journey import (
     # serializable,
     # deserializable,
 )
+from .paths import GDS_Tidy3DPath
 
 __all__ = [
     "PATH",
@@ -108,4 +109,5 @@ __all__ = [
     "read",
     "writable",
     "readable",
+    "GDS_Tidy3DPath",
 ]

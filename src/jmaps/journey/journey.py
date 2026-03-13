@@ -17,6 +17,7 @@ from tqdm import tqdm
 from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from sqlalchemy import select, Null, create_engine
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import PendingRollbackError
 
 from jmaps.config import PATH
 from jmaps.journey.jmalc import (
@@ -28,7 +29,7 @@ from jmaps.journey.jmalc import (
     DBResult,
 )
 from jmaps.journey.path import JPath, JBatch, PathResult, ExecutionType
-from jmaps.journey.param import REF_SEP, JDict
+from jmaps.journey.param import REF_SEP, JDict, JValue, Refer
 class PathOptions(BaseModel):
     """Runtime options controlling path execution and caching."""
 
@@ -283,27 +284,6 @@ class Journey(BaseModel):
             else:
                 print(error_string)
 
-    def run(self, env: JDict, path_name: str, path_options: PathOptions, update_env_usage: bool = True):
-        """Run a named path using the Journey's root environment.
-
-        Args:
-            path_name: Name of the path to run.
-            path_options: Execution and caching options.
-            session: SQLAlchemy session to use for the database.
-            update_env_usage: If True, the environment usage is updated with the usage of the path.
-        Returns:
-            tuple[PathResult, dict[str, Any] | None]: A tuple of the path result
-            and subpath results.
-        """
-        if path_name not in self.paths:
-            raise ValueError(f"The path '{path_name}' does not exist in this Journey")
-        local_env = env.model_copy(deep=True)
-        result, subpath_results = self._run(local_env, path_name, path_options, is_parent=True)
-        if update_env_usage:
-            env.init_run(is_parent_path=True)
-            env.merge_usage(local_env)
-        return result, subpath_results
-
     def init_session(self) -> Session:
         if self.engine is None:
             self.engine = create_engine(self.db_engine_arg)
@@ -317,6 +297,92 @@ class Journey(BaseModel):
             self.engine = create_engine(self.db_engine_arg)
             create_tables(self.engine)
         return Session(bind=self.engine)
+
+    def complete_run(
+        self, env: JDict, db_result_id: int, path_options: PathOptions
+    ):
+        """Complete a run by loading the results from the database and updating the environment.
+
+        Args:
+            env: Environment to use for this run. This will be updated with the environment parameters used in the partial run.
+            db_result_id: The ID of the database result to load.
+            path_options: Execution and caching options.
+        """
+        local_env = env.model_copy(deep=True)
+        made_session = False
+        if self.session is None:
+            self.init_session()
+            made_session = True
+        try:
+            result_stmt = select(DBResult).where(DBResult.id == db_result_id)
+            db_result = self.session.execute(result_stmt).scalar_one()
+            path_name = db_result.path_name
+            if db_result is None:
+                raise ValueError(f"No result found for ID {db_result_id}")
+            partial_result = PathResult(sql=db_result.data, db_result_id=db_result.id, completed=db_result.completed)
+            local_env.load_from_db_result(db_result)
+            partial_result.from_file(
+                Path(db_result.file_path) if db_result.file_path is not None else None,
+                db_result.path_version.file_schema,
+            )
+            subpath_options = path_options.model_copy()
+            subpath_options.force_run_to_depth = (
+                subpath_options.force_run_to_depth - 1
+                if subpath_options.force_run_to_depth > 0
+                else 0
+            )
+            subpath_results = self.run_subpaths(local_env, path_name, subpath_options)
+            if db_result.completed:
+                if path_options.verbose:
+                    print(f"Run is already complete, loading it instead of running it again.")
+                return partial_result, subpath_results
+            # Run the path.
+            result = self.paths[path_name].run(
+                local_env, subpath_results, self, partial_result=partial_result, verbose=path_options.verbose
+            )
+            # Save the results
+            self.save_path_results(local_env, path_name, result)
+            if result.error is not None:
+                print(f"Error running {path_name}: partial result saved to {result.db_result_id}")
+                raise result.error
+            self.paths[path_name].update_env(local_env, result, subpath_results)
+            # Plot the path results.
+            if path_options.plot:
+                self.paths[path_name].plot(result, subpath_results)
+        finally:
+            if made_session:
+                self.session.commit()
+                self.session.close()
+                self.session = None
+                
+        env.init_run(is_parent_path=True)
+        env.replace(local_env, merge_usage=True, merge_dtypes=False)
+        if self.session is not None:
+            self.session.commit()
+        return result, subpath_results
+
+    def run(self, env: JDict, path_name: str, path_options: PathOptions):
+        """Run a named path using the Journey's root environment.
+
+        Args:
+            path_name: Name of the path to run.
+            path_options: Execution and caching options.
+            session: SQLAlchemy session to use for the database.
+        Returns:
+            tuple[PathResult, dict[str, Any] | None]: A tuple of the path result
+            and subpath results.
+        """
+        if path_name not in self.paths:
+            raise ValueError(f"The path '{path_name}' does not exist in this Journey")
+        local_env = env.model_copy(deep=True)
+        result, subpath_results = self._run(local_env, path_name, path_options, is_parent=True)
+        env.init_run(is_parent_path=True)
+        # env.merge_usage(local_env)
+        env.replace(local_env, merge_usage=True, merge_dtypes=False)
+        if self.session is not None:
+            self.session.commit()
+        return result, subpath_results
+
     def _run(
         self, local_env: JDict, path_name: str, path_options: PathOptions, is_parent: bool = False
     ):
@@ -345,14 +411,21 @@ class Journey(BaseModel):
             if path_options.force_run_to_depth == 0 and not path_options.disable_saving_and_loading:
                 result = self.load_path_results(local_env, path_name)
             if result is not None:
-                if path_options.verbose:
-                    print(f"Loading {path_name}: {result}")
-                # Don't load another recursion of subpaths if we are a subpath already.
-                if not is_parent:
-                    return result, None
+                if not result.completed:
+                    if path_options.verbose:
+                        action_str = "Partially loaded"
+                        # print(f"Partially loading {path_name}: {result}")
+                else:
+                    if path_options.verbose:
+                        action_str = "Loaded"
+                        # print(f"Loading {path_name}: {result}")
+                    # Don't load another recursion of subpaths if we are a subpath already.
+                    if not is_parent:
+                        return result, None
             else:
                 if path_options.verbose:
-                    print(f"Running {path_name}.")
+                    action_str = "Ran"
+                    # print(f"Running {path_name}.")
             subpath_options = path_options.model_copy()
             subpath_options.force_run_to_depth = (
                 subpath_options.force_run_to_depth - 1
@@ -360,20 +433,37 @@ class Journey(BaseModel):
                 else 0
             )
             subpath_results = self.run_subpaths(local_env, path_name, subpath_options)
-            if result is None:
+            if result is None or not result.completed:
                 # Run the path.
                 result = self.paths[path_name].run(
-                    local_env, subpath_results, path_options.verbose
+                    local_env, subpath_results, self, partial_result=result, verbose=path_options.verbose
                 )
                 # Save the results to cache.
                 if not path_options.disable_saving_and_loading:
                     self.save_path_results(local_env, path_name, result)
-            # Plot the path results.
-            if path_options.plot:
-                self.paths[path_name].plot(result, subpath_results)
+            if result.error is not None:
+                self.session.commit()
+                action_str = "Partially ran"
+                # print(f"Error running {path_name}: partial result saved to {result.db_entry.id}")
+                if not is_parent:
+                    raise result.error
+            else:
+                self.paths[path_name].update_env(local_env, result, subpath_results)
+                # Plot the path results.
+                if path_options.plot:
+                    self.paths[path_name].plot(result, subpath_results)
         finally:
             if made_session:
-                self.session.commit()
+                try:
+                    self.session.commit()
+                except PendingRollbackError as e:
+                    # print(f"Error committing session: {e}")
+                    self.session.rollback()
+                    self.session.close()
+                    self.session = None
+                    raise e
+                if result is not None and path_options.verbose:
+                    print(f"{action_str} results for {path_name} to the database, ID: {result.db_entry.id}.")
                 self.session.close()
                 self.session = None
         return result, subpath_results
@@ -405,7 +495,8 @@ class Journey(BaseModel):
                     subpath_env, subpath_name, subpath_options, is_parent=False
                 )
                 subpath_results[subpath_name] = subpath_result
-                local_env.merge_usage(subpath_env)
+                # local_env.merge_usage(subpath_env)
+                local_env.replace(subpath_env, merge_usage=True, merge_dtypes=False)
             else:
                 subpath_results[subpath_name] = self.run_batch(local_env, subpath_name, batch, subpath_options)
         return subpath_results
@@ -442,7 +533,8 @@ class Journey(BaseModel):
                     for future in enumerate_futures:
                         result, batch_id, usage_env = future.result()
                         if usage_env is not None:
-                            local_env.merge_usage(usage_env)
+                            # local_env.merge_usage(usage_env)
+                            local_env.replace(usage_env, merge_usage=True, merge_dtypes=False)
                         batch_results[batch_id] = result
             
             case ExecutionType.MULTIPLE_THREADS:
@@ -464,7 +556,8 @@ class Journey(BaseModel):
                     for future in enumerate_futures:
                         result, batch_id, usage_env = future.result()
                         if usage_env is not None:
-                            local_env.merge_usage(usage_env)
+                            # local_env.merge_usage(usage_env)
+                            local_env.replace(usage_env, merge_usage=True, merge_dtypes=False)
                         batch_results[batch_id] = result
             
             case ExecutionType.SINGLE_PROCESS:
@@ -489,7 +582,8 @@ class Journey(BaseModel):
                     if update_local_env:
                         # These are dependent parameters, so don't count towards usage.
                         batch_env.reset_usage()
-                        local_env.merge_usage(path_env)
+                        # local_env.merge_usage(path_env)
+                        local_env.replace(path_env, merge_usage=True, merge_dtypes=False)
                         update_local_env = False
 
                     # Save the results of the subpath.
@@ -503,7 +597,6 @@ class Journey(BaseModel):
         Args:
             local_env: Environment containing parameter trees.
             path_name: Name of the path whose results should be loaded.
-
         Returns:
             PathResult | None: Loaded result, or ``None`` if no matching entry
             exists in the cache.
@@ -544,26 +637,37 @@ class Journey(BaseModel):
         temp_env: dict[str, Any] = {}
         for param_used in env_schema.keys():
             param_path = param_used.split(REF_SEP)
+            # print(param_path)
             jparam = local_env
             dtype = None
             for i, key in enumerate(param_path):
+                while not isinstance(jparam, JDict):
+                    jparam = jparam.jparam
                 if i == len(param_path) - 1:
-                    dtype = jparam.data[key].dtype
-                jparam = jparam[key]
+                    if key == 'jvar':
+                        # Bypass get_value to get the actual param
+                        param_value = jparam.data[key].get_value().__name__
+                    else:
+                        dtype = jparam.data[key].dtype
+                        param_value = jparam.data[key].get_value()
+                else:
+                    jparam = jparam.data[key]
+                    jparam.used = True
             temp_env[param_used] = (
-                cast_sql_type(jparam) if dtype is None else dtype(jparam)
+                cast_sql_type(param_value) if dtype is None else dtype(param_value)
             )
         result_stmt = select(DBResult).where(
             DBResult.path_name == path_name,
             DBResult.path_version_num == path_version_num,
             DBResult.environment == temp_env,
             DBResult.created_at == Null(),
+            DBResult.completed == True,
         )
         db_result = self.session.execute(result_stmt).scalar_one_or_none()
         if db_result is None:
             local_env.reset_usage()
             return None
-        result = PathResult(sql=db_result.data)
+        result = PathResult(sql=db_result.data, db_entry=db_result, completed=db_result.completed)
         result.from_file(
             Path(db_result.file_path) if db_result.file_path is not None else None,
             file_schema,
@@ -623,11 +727,12 @@ class Journey(BaseModel):
             self.session.add(path_version)
             self.session.commit()
         path_version_num = path_version.version
-        path.current_version = path_version_num
-        if self.cache_db_meta:
-            self.db_current_path_versions[path_name] = path_version_num
-            self.db_current_path_env_schemas[path_name] = env_schema
-            self.db_current_path_file_schemas[path_name] = file_schema if not isinstance(file_schema, Null) else None
+        if result.completed:
+            path.current_version = path_version_num
+            if self.cache_db_meta:
+                self.db_current_path_versions[path_name] = path_version_num
+                self.db_current_path_env_schemas[path_name] = env_schema
+                self.db_current_path_file_schemas[path_name] = file_schema if not isinstance(file_schema, Null) else None
         # Add new DBResult entry, linking to the path_version.
         if self.paths[path_name].save_datetime:
             db_result = DBResult(
@@ -637,6 +742,7 @@ class Journey(BaseModel):
                 path_version_num=path_version_num,
                 file_path=str(file_path) if not isinstance(file_schema, Null) else Null(),
                 created_at=datetime.now(timezone.utc),
+                completed=result.completed,
             )
             self.session.add(db_result)
         else:
@@ -655,11 +761,14 @@ class Journey(BaseModel):
                     path_version_num=path_version_num,
                     file_path=str(file_path) if file_path is not None else Null(),
                     created_at=Null(),
+                    completed=result.completed,
                 )
                 self.session.add(db_result)
             else:
                 db_result.data = result.sql
                 db_result.file_path = str(file_path) if file_path is not None else None
+                db_result.completed = result.completed
+        result.db_entry = db_result
         # self.session.commit()
 
     # Overrides

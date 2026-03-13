@@ -17,6 +17,8 @@ import tidy3d as td
 from typing import Any
 
 def evaluate_keys(env: JDict, keys: str|list[str]):
+    if keys is None:
+        return {}
     if isinstance(keys, str):
         return env[keys]
     result = env
@@ -31,23 +33,33 @@ class GDS_Tidy3DPath(JPath):
     and `batch_modeler` to define how components are generated and how batches
     of simulations are formed.
     """
-    
-    gds_component: str|list[str]|None = Field(['gds_component'], description='List of keys leading to the gds component for the path.')
-    custom_fdtd: str|list[str]|None = Field(None, description='List of keys leading to the fdtd parameters for the path.')
-    td_modeler_args: str|list[str]|None = Field(None, description='List of keys leading to the modeler parameters for the path')
-    td_component_args: str|list[str]|None = Field(None, description='List of keys leading to the component parameters for the path')
+
+    gds_component: str|list[str] = Field(['gds_component'], description='List of keys leading to the gds component (YBuffer) for the path.')
+    pdk: str|list[str] = Field('pdk', description='List of keys leading to the pdk to use for the path.')
+    custom_fdtd: bool = Field(False, description='Whether to use the custom fdtd modification function for the path. If true, modify_sim function must be defined in the path.')
+    td_modeler_args: str|list[str]|None = Field('td_modeler_args', description='List of keys leading to the modeler parameters for the path')
+    td_component_args: str|list[str]|None = Field('td_component_args', description='List of keys leading to the component parameters for the path')
     delete_server_data: bool = True
 
-    @property
-    def name(self) -> str:
-        """Unique name of the path"""
-        return "gds_tidy3d"
+    def modify_sim(self, sim: td.Simulation, td_c, modeler, env: JDict):
+        """Modify the simulation for the path.
+        
+        Args:
+            sim: The simulation to modify.
+            td_c: The tidy3d component of the path.
+            modeler: The modeler of the path.
+            env: The environment variables for the path.
+        
+        Returns:
+            sim: The modified simulation.
+        """
+        raise NotImplementedError('modify_sim function must be defined in the path.')
 
-    def get_component(self, env: JDict, subpath_results: dict[str, Any], batch_i: int=0):
+    def get_component(self, env: JDict, subpath_results: dict[str, Any]):
         '''Override this method to return the component of the path.'''
-        return env['gds_component']['c'](**env['gds_args'])
+        return evaluate_keys(env, self.gds_component)
     
-    def _run(self, env: JDict, subpath_results: dict[str, Any], verbose: bool=False):
+    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result=None, verbose: bool = False):
         ''' Run the simulation of the component.
         Args:
             envs: Dictionary of environment variables.
@@ -57,6 +69,7 @@ class GDS_Tidy3DPath(JPath):
             sp: S-parameters of the component if using default gds modeler.
             result: SimulationData object of the tidy3d simulation if using custom fdtd parameters.
         '''
+        evaluate_keys(env, self.pdk).activate()
         result = PathResult()
         if not self.custom_fdtd:
             sp = gt.write_sparameters(
@@ -64,15 +77,15 @@ class GDS_Tidy3DPath(JPath):
                 **evaluate_keys(env, self.td_component_args),
                 **evaluate_keys(env, self.td_modeler_args),
             )
-            result.file['s_params'] = sp
+            result.file = {'s_params': sp}
         else:
-            batch = None
+            job = None
             try:
-                sim, td_c, modeler = self.get_simulation(env, subpath_results)
-                job = td.web.Job(sim, verbose=verbose)
-                result.file['sim_data'] = batch.run()
+                sim, td_c, modeler = self.get_simulation(env)
+                job = td.web.Job(simulation=sim, task_name=self.name, verbose=verbose)
+                result.file = {'sim_data': job.run()}
             finally:
-                if self.delete_server_data and batch is not None:
+                if self.delete_server_data and job is not None:
                     job.delete()
         return result
 
@@ -88,7 +101,7 @@ class GDS_Tidy3DPath(JPath):
             plt.axhline(1, color='k', linestyle='--')
             gp.plot.plot_sparameters(result.file['s_params'], logscale=False)
 
-    def get_simulation(self, env: JDict, subpath_results: dict[str, Any]):
+    def get_simulation(self, env: JDict):
         """Get the simulation of the component.
         
         Args:
@@ -104,10 +117,10 @@ class GDS_Tidy3DPath(JPath):
         modeler = td_c.get_component_modeler(**evaluate_keys(env, self.td_modeler_args))
         sim = modeler.simulation
         if self.custom_fdtd:
-            sim = modeler.simulation.copy(update=dict(**evaluate_keys(env, self.custom_fdtd)))
+            sim = self.modify_sim(sim, td_c, modeler, env)
         return sim, td_c, modeler
 
-    def plot_geom(self, env: JDict, subpath_results: dict[str, Any], layer_name: str, validate=True):
+    def plot_geom(self, env: JDict, layer_name: str, validate=True):
         """Plot the geometry of the component.
         
         Args:
@@ -115,7 +128,7 @@ class GDS_Tidy3DPath(JPath):
             layer_name: Name of the gds layer to plot.
             validate: Whether to validate the simulation for the daily allowance.
         """
-        sim, td_c, modeler = self.get_simulation(env, subpath_results)
+        sim, td_c, modeler = self.get_simulation(env)
         # we can plot the tidy3d simulation setup
         if self.custom_fdtd:
             fig, ax = plt.subplots(3, 1)
@@ -134,7 +147,7 @@ class GDS_Tidy3DPath(JPath):
         if validate:
             validate_sim_for_daily_allowance(sim)
 
-    def plot_mode(self, env:JDict, subpath_results: dict[str, Any], mode_index=0, port_index=0):
+    def plot_mode(self, env:JDict, mode_index=0, port_index=0):
         """Plot the mode of the component.
         
         Args:

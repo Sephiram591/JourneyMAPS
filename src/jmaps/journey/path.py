@@ -36,7 +36,15 @@ class PathResult(BaseModel):
     file: Dict[str, Any] | None = Field(
         None, description="Results that are saved to a file using the IO registry."
     )
-
+    completed: bool = Field(
+        True, description="Whether the path has completed successfully. If False, the path was interrupted or failed."
+    )
+    db_entry: Any = Field(
+        None, description="The ID of the database result that this path result corresponds to."
+    )
+    error: Any = Field(
+        None, description="An error orexception that occurred while running the path, buffered to allow partial results to be saved to the database."
+    )
     def __getitem__(self, key: str) -> Any:
         """Return a result by key, preferring SQL-backed values."""
         try:
@@ -179,7 +187,7 @@ class JPath(ABC, BaseModel):
     )
 
     @abstractmethod
-    def _run(self, env: JDict, subpath_results: dict[str, Any], verbose: bool = False) -> PathResult:
+    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result: PathResult | None = None, verbose: bool = False) -> PathResult:
         """Implement the core logic for this path.
 
         This method must be overridden by subclasses to perform the actual work
@@ -188,6 +196,7 @@ class JPath(ABC, BaseModel):
         Args:
             env: Environment of parameters used to run the path.
             subpath_results: Results from all subpaths listed in ``subpaths``.
+            partial_result: Partial result from a previous run of the path, if any.
             verbose: If ``True``, print additional diagnostic output.
 
         Returns:
@@ -196,19 +205,19 @@ class JPath(ABC, BaseModel):
         """
         raise NotImplementedError
 
-    def plot(self, result: Any, subpath_results: dict[str, Any]):
+    def plot(self, result: PathResult, subpath_results: dict[str, Any]):
         """Visualize or summarize the path results.
 
         Subclasses may override this method to produce plots, tables, or other
         analysis artifacts.
 
         Args:
-            result: Result returned by :meth:`_run`.
+            result: PathResult returned by :meth:`_run`.
             subpath_results: Results from subpaths.
         """
         pass
 
-    def run(self, env: JDict, subpath_results: dict[str, Any], verbose: bool = False):
+    def run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result: PathResult | None = None, verbose: bool = False):
         """Execute the path under a locked environment.
 
         The environment is temporarily locked to prevent accidental parameter
@@ -217,6 +226,7 @@ class JPath(ABC, BaseModel):
         Args:
             env: Environment of parameters to run the path with.
             subpath_results: Results of the subpaths.
+            partial_result: Partial result from a previous run of the path, if any.
             verbose: If ``True``, print additional diagnostic output.
 
         Returns:
@@ -224,11 +234,21 @@ class JPath(ABC, BaseModel):
         """
         try:
             env.lock()
-            result = self._run(env, subpath_results, verbose)
+            result = self._run(env, subpath_results, journey, partial_result, verbose)
         finally:
             env.unlock()
 
         return result
+
+    def update_env(self, env: JDict, result: PathResult, subpath_results: dict[str, Any]):
+        """Update the environment with the results of the path.
+
+        Args:
+            env: Environment to update.
+            result: Result of the path.
+            subpath_results: Results of the subpaths.
+        """
+        pass
 
     def get_batch(
         self, subpath_name: str, env: JDict, previous_subpath_results: dict[str, Any]

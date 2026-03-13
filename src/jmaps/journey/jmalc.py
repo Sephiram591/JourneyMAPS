@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Integer,
     String,
+    Boolean,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -44,6 +45,8 @@ def get_sql_type(value):
         return "str"
     if isinstance(value, datetime):
         return "datetime"
+    if isinstance(value, list):
+        return "list"
     raise TypeError(
         f"Value: {value}, with type {type(value)} is not a valid type for sql "
         "(int, float, bool, str, datetime)."
@@ -79,6 +82,8 @@ def cast_sql_type(value):
         return value
     if isinstance(value, datetime):
         return value.timestamp()
+    if isinstance(value, list):
+        return [cast_sql_type(v) for v in value]
     raise TypeError(
         f"Value: {value}, with type {type(value)} is not a valid type for sql "
         "(int, float, bool, str, datetime)."
@@ -155,6 +160,7 @@ class DBResult(Base):
     data = Column(JSONB, nullable=True)
     file_path = Column(String, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    completed = Column(Boolean, nullable=False)
 
     # Relationship back to PathVersion
     path_version = relationship("DBPathVersion", back_populates="results")

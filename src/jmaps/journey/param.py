@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict
 
 from pydantic import PrivateAttr, BaseModel, Field
 
-from jmaps.journey.jmalc import get_sql_type, cast_sql_type
+from jmaps.journey.jmalc import get_sql_type, cast_sql_type, DBResult
 
 REF_SEP = "."
 
@@ -21,6 +21,7 @@ class ResetCondition(Enum):
     """When a :class:`Buffer` should reset its cached value."""
 
     NEVER = auto()
+    ALWAYS = auto()
     ON_RUN = auto()
     ON_RUN_IF_PARENT_PATH = auto()
 
@@ -83,6 +84,21 @@ class JParam(ABC, BaseModel):
             self._get_children(), mirror_param._get_children()
         ):
             self_child.merge_usage(mirror_child)
+
+
+    def merge_dtypes(self, mirror_param: "JParam"):
+        """Propagate dtype information from a mirror parameter tree. Mirror param overrides self dtype if it is not None."""
+        if isinstance(self, JValue) and isinstance(mirror_param, JValue):
+            self.dtype = mirror_param.dtype if mirror_param.dtype is not None else self.dtype
+        elif isinstance(self, JDict):
+            for k, v in self.data.items():
+                if k in mirror_param.data:
+                    v.merge_dtypes(mirror_param.data[k])
+                else:
+                    v.merge_dtypes(None)
+        else:
+            for self_child, mirror_child in zip(self._get_children(), mirror_param._get_children()):
+                self_child.merge_dtypes(mirror_child)
 
     def _init_run(self, is_parent_path: bool, parent_env: "JParam"):
         """Subclass hook invoked at the start of a run."""
@@ -197,21 +213,25 @@ class JDict(JParam):
         """Return the parameter names contained in this dictionary."""
         return self.data.keys()
 
-    def replace(self, other: "JDict | dict[str, Any]"):
+    def replace(self, other: "JDict | dict[str, Any]", merge_dtypes: bool = True, merge_usage: bool = True):
         """Merge values from another :class:`JDict` into this one.
 
         Dtypes from ``self`` are preserved in the final object
 
         Args:
-            other: Source dictionary or :class:`JDict` whose entries are merged.
-
+            other: Source dictionary or :class:`JDict` whose entries are merged. The schema of the other dict must be a subset of the schema of this dict.
+            merge_dtypes: If True, the dtypes of the other dict are merged into this dict.
+            merge_usage: If True, the usage of the other dict is merged into this dict.
         Raises:
             TypeError: If ``other`` cannot be converted to :class:`JDict`.
         """
         other = wrap_jparam(other)
         if not isinstance(other, JDict):
             raise TypeError("Other is not a JDict, cannot replace.")
-        other.merge_dtypes(self)
+        if merge_dtypes:
+            other.merge_dtypes(self)
+        if merge_usage:
+            other.merge_usage(self)
         self.data.update(other.data)
 
     def __getitem__(self, key: str):
@@ -231,6 +251,7 @@ class JDict(JParam):
             and self.data[key].dtype is not None
         ):
             self.data[key].value = value
+            self.data[key].used = False
         else:
             self.data[key] = wrap_jparam(value)
 
@@ -257,6 +278,7 @@ class JDict(JParam):
                 and self.data[key].dtype is not None
             ):
                 self.data[key].value = value
+                self.data[key].used = False
             else:
                 self.data[key] = wrap_jparam(value)
 
@@ -284,20 +306,17 @@ class JDict(JParam):
                         sql_dict[k + REF_SEP + k2] = v2
                 elif not isinstance(sql_data, InvisibleParam):
                     sql_dict[k] = sql_data
+                elif isinstance(sql_data, InvisibleParam) and show_invisible:
+                    sql_dict[k] = sql_data.jparam.get_sql_data(show_unused, show_invisible, return_schema)
         return sql_dict
-
-    def merge_dtypes(self, other: "JDict"):
-        """Propagate dtype information from another :class:`JDict`."""
-        for k, v in self.data.items():
-            if k in other.data:
-                if (
-                    isinstance(v, JValue)
-                    and isinstance(other.data[k], JValue)
-                    and other.data[k].dtype is not None
-                ):
-                    v.dtype = other.data[k].dtype
-                elif isinstance(v, JDict) and isinstance(other.data[k], JDict):
-                    v.merge_dtypes(other.data[k])
+    def load_from_db_result(self, db_result: DBResult):
+        """Load the environment from a database result."""
+        for k, v in db_result.environment.items():
+            ref_list = k.split(REF_SEP)
+            jparam = self
+            for ref in ref_list[:-1]:
+                jparam = jparam[ref]
+            jparam[ref_list[-1]] = v
 
 
 class Buffer(JDict):
@@ -307,36 +326,46 @@ class Buffer(JDict):
     The :class:`ResetCondition` controls when the cached value is cleared.
     """
 
-    var: Any
+    # jvar: Any
     reset_condition: ResetCondition
     value: Any | None = None
+    args_list: list[str]
+    kwargs_list: list[str]
 
     def __init__(
-        self, var, *args, reset_condition: ResetCondition = ResetCondition.NEVER, **kwargs
+        self, jvar, *args, reset_condition: ResetCondition = ResetCondition.NEVER, **kwargs
     ):
         """Initialize a :class:`Buffer`.
 
         Args:
-            var: Function or callable object to invoke.
+            jvar: Function or callable object to invoke.
             *args: Positional arguments (possibly :class:`JParam` instances).
             reset_condition: Rule governing when to reevaluate the callable.
             **kwargs: Keyword arguments (possibly :class:`JParam` instances).
         """
-        binding = signature(var).bind(*args, **kwargs)
+        binding = signature(jvar).bind(*args, **kwargs)
+        args_list = [k for k in binding.arguments if k not in binding.kwargs]
+        kwargs_list = [k for k in binding.kwargs]
         data = binding.arguments
-        for k, v in data.items():
-            data[k] = wrap_jparam(v)
-        super().__init__(var=var, reset_condition=reset_condition, data=binding.arguments)
+        data['jvar'] = InvisibleParam(jvar)
+
+        super().__init__(reset_condition=reset_condition, data=data, args_list=args_list, kwargs_list=kwargs_list)
 
     def _get_value(self):
-        if self.value is None:
-            eval_arguments = {k: v.get_value() for k, v in self.data.items()}
-            self.value = self.var(**eval_arguments)
+        
+        if self.reset_condition == ResetCondition.ALWAYS:
+            eval_kwargs = {k: self[k] for k in self.kwargs_list}
+            eval_args = [self[k] for k in self.args_list]
+            return self.jvar(*eval_args, **eval_kwargs)
+        elif self.value is None:
+            eval_kwargs = {k: self[k] for k in self.kwargs_list}
+            eval_args = [self[k] for k in self.args_list]
+            self.value = self.jvar(*eval_args, **eval_kwargs)
         return self.value
 
     def _init_run(self, is_parent_path: bool, parent_env: JParam):
         # Reset value if condition is met
-        if self.reset_condition == ResetCondition.ON_RUN or (
+        if self.reset_condition == ResetCondition.ON_RUN or self.reset_condition == ResetCondition.ALWAYS or (
             is_parent_path and self.reset_condition == ResetCondition.ON_RUN_IF_PARENT_PATH
         ):
             self.value = None
@@ -346,7 +375,7 @@ class Buffer(JDict):
     ):
         """Return SQL data including the callable name."""
         sql_dict = super().get_sql_data(show_unused, show_invisible, return_schema)
-        sql_dict["var"] = self.var.__name__
+        sql_dict["jvar"] = self.jvar.__name__
         return sql_dict
 
 
@@ -371,14 +400,14 @@ class XBuffer(Buffer):
 
     def __init__(
         self,
-        var,
+        jvar,
         *args,
         reset_condition: ResetCondition = ResetCondition.NEVER,
         dtype: Callable | None = None,
         **kwargs,
     ):
         """Initialize an :class:`XBuffer`."""
-        super().__init__(var, *args, reset_condition=reset_condition, **kwargs)
+        super().__init__(jvar, *args, reset_condition=reset_condition, **kwargs)
         self.dtype = dtype
 
     def get_sql_data(

@@ -29,4 +29,8 @@ jmaps/paths
 Description
 """
 
-from jmaps.paths.tidy3d import *
+from .tidy3d import GDS_Tidy3DPath
+
+__all__ = [
+    "GDS_Tidy3DPath",
+]

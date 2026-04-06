@@ -12,9 +12,12 @@ from pydantic import Field
 import gplugins as gp
 import gplugins.tidy3d as gt
 import matplotlib.pyplot as plt
-from pmag.simulation.tidytools import validate_sim_for_daily_allowance, get_fdtd_sim
+from pmag.simulation.tidytools import validate_sim_for_daily_allowance
 import tidy3d as td
+from tidy3d.plugins.mode import ModeSolver
 from typing import Any
+import numpy as np
+from jmaps.journey.journey import PathOptions
 
 def evaluate_keys(env: JDict, keys: str|list[str]):
     if keys is None:
@@ -59,12 +62,12 @@ class GDS_Tidy3DPath(JPath):
         '''Override this method to return the component of the path.'''
         return evaluate_keys(env, self.gds_component)
     
-    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result=None, verbose: bool = False):
+    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result=None, path_options: PathOptions = None):
         ''' Run the simulation of the component.
         Args:
             envs: Dictionary of environment variables.
             subpath_results: Dictionary of results from the subpaths.
-            verbose: Whether to print verbose output.
+            path_options: Path options for the run.
         Returns:
             sp: S-parameters of the component if using default gds modeler.
             result: SimulationData object of the tidy3d simulation if using custom fdtd parameters.
@@ -82,7 +85,7 @@ class GDS_Tidy3DPath(JPath):
             job = None
             try:
                 sim, td_c, modeler = self.get_simulation(env)
-                job = td.web.Job(simulation=sim, task_name=self.name, verbose=verbose)
+                job = td.web.Job(simulation=sim, task_name=self.name, verbose=path_options.verbose)
                 result.file = {'sim_data': job.run()}
             finally:
                 if self.delete_server_data and job is not None:
@@ -163,3 +166,61 @@ class GDS_Tidy3DPath(JPath):
             plot_mode_index=mode_index,
             plot_mode_port_name=c.ports[port_index].name,
         )
+
+
+class GDS_TidyModePath(GDS_Tidy3DPath):
+    """A `JPath` that creates a component, then simulates modes with Tidy3D.
+    """
+    use_web: str|list[str]|None = Field('use_web', description='List of keys leading to the use web parameters for the path')
+    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result=None, path_options: PathOptions = None):
+        ''' Run the simulation of the component.
+        Args:
+            envs: Dictionary of environment variables.
+            subpath_results: Dictionary of results from the subpaths.
+            path_options: Path options for the run.
+        Returns:
+            sp: S-parameters of the component if using default gds modeler.
+            result: SimulationData object of the tidy3d simulation if using custom fdtd parameters.
+        '''
+        evaluate_keys(env, self.pdk).activate()
+        result = PathResult()
+        sim, td_c, modeler = self.get_simulation(env)
+        modeler_args = evaluate_keys(env, self.td_modeler_args)
+        freqs = td.C_0 / np.linspace(modeler_args['wavelength'] - modeler_args['bandwidth'] / 2, modeler_args['wavelength'] + modeler_args['bandwidth'] / 2, modeler_args['num_freqs'])
+        port_names = set([port_spec[0] for port_spec in modeler_args['run_only']])
+        for port in modeler.ports:
+            if port.name in port_names:
+                plane = td.Box(size=port.size, center=port.center)
+                mode_solver = ModeSolver(simulation=sim, plane=plane, mode_spec=modeler_args['mode_spec'], freqs=freqs)
+                if evaluate_keys(env, self.use_web):
+                    mode_data = td.web.run(mode_solver, "mode_solver", verbose=path_options.verbose)
+                else:
+                    mode_data = mode_solver.solve()
+                result.file = {port.name: mode_solver}
+        if len(result.file) == 0:
+            raise ValueError(f"No ports found in component for port names: {port_names}")
+        return result
+
+    def plot(self, result: Any, subpath_results: dict[str, Any]):
+        """Plots the S-parameters of the component if using default gds modeler.
+        
+        Args:
+            result: The results of the path run given the environments.
+            subpath_results: Dictionary of results from the subpaths.
+        """
+        for port_name, mode_solver in result.file.items():
+            f0 = np.mean(mode_solver.data.n_complex.f.values)
+            f, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, tight_layout=True, figsize=(12, 3))
+            f.suptitle(f"{port_name}")
+            mode_solver.plot_field("Ex", "real", mode_index=0, f=f0, ax=ax1)
+            mode_solver.plot_field("Ey", "real", mode_index=0, f=f0, ax=ax2)
+            mode_solver.plot_field("Ez", "real", mode_index=0, f=f0, ax=ax3)
+            ax1.set_title(f"Ex at {f0/1e12:.2f} THz")
+            ax2.set_title(f"Ey at {f0/1e12:.2f} THz")
+            ax3.set_title(f"Ez at {f0/1e12:.2f} THz")
+
+            n_eff = mode_solver.data.n_complex.real
+            n_eff.plot.line(x='f', ax=ax4)
+            plt.show()
+
+

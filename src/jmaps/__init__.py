@@ -43,12 +43,12 @@ __website_url__ = "https://camacholab.byu.edu/"
 from .config import PATH
 from .journey import (
     Journey,
-    PathOptions,
     get_filename,
     JBatch,
     JPath,
     PathResult,
     ExecutionType,
+    PathOptions,
     REF_SEP,
     ResetCondition,
     JParam,
@@ -60,6 +60,7 @@ from .journey import (
     XBuffer,
     Refer,
     wrap_jparam,
+    evaluate_keys,
     Base,
     get_sql_type,
     cast_sql_type,
@@ -74,7 +75,7 @@ from .journey import (
     # serializable,
     # deserializable,
 )
-from .paths import GDS_Tidy3DPath
+from .paths import GDS_Tidy3DPath, GDS_TidyModePath
 
 __all__ = [
     "PATH",
@@ -109,5 +110,7 @@ __all__ = [
     "read",
     "writable",
     "readable",
+    "evaluate_keys",
     "GDS_Tidy3DPath",
+    "GDS_TidyModePath",
 ]

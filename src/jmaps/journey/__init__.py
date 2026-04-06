@@ -23,8 +23,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .journey import Journey, PathOptions, get_filename
-from .path import JBatch, JPath, PathResult, ExecutionType
+from .journey import Journey, get_filename
+from .path import JBatch, JPath, PathResult, ExecutionType, PathOptions
 from .param import (
     REF_SEP,
     ResetCondition,
@@ -37,6 +37,7 @@ from .param import (
     XBuffer,
     Refer,
     wrap_jparam,
+    evaluate_keys,
 )
 from .jmalc import (
     Base,
@@ -59,12 +60,12 @@ from .io import (
 
 __all__ = [
     "Journey",
-    "PathOptions",
     "get_filename",
     "JBatch",
     "JPath",
     "PathResult",
     "ExecutionType",
+    "PathOptions",
     "REF_SEP",
     "ResetCondition",
     "JParam",
@@ -76,6 +77,7 @@ __all__ = [
     "XBuffer",
     "Refer",
     "wrap_jparam",
+    "evaluate_keys",
     "Base",
     "get_sql_type",
     "cast_sql_type",

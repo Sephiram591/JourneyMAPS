@@ -14,7 +14,31 @@ from pydantic import BaseModel, Field
 from jmaps.journey.io import read, write
 from jmaps.journey.jmalc import get_sql_schema
 from jmaps.journey.param import JDict, wrap_jparam
+
 from enum import Enum
+
+class PathOptions(BaseModel):
+    """Runtime options controlling path execution and caching."""
+
+    force_run_to_depth: int = Field(
+        0,
+        description=(
+            "Force the path tree to run even if cached. Most useful when a path "
+            "has been changed but outdated cached results still exist. Because "
+            "subpaths form a tree with the main path at the top, this is "
+            "specified as an integer indicating how deep the forced re-run "
+            "should propagate."
+        ),
+    )
+    disable_saving_and_loading: bool = Field(
+        False,
+        description="If true, results are not saved to or loaded from the database.",
+    )
+    plot: bool = Field(True, description="Whether to plot results after running.")
+    verbose: bool = Field(False, description="Whether to print verbose output.")
+    batch_tqdm: bool = Field(
+        True, description="Track batch progress with tqdm when running subpaths."
+    )
 
 class ExecutionType(Enum):
     """Type of path result."""
@@ -123,7 +147,7 @@ class JBatch(dict[str, JDict]):
         """
         differences = DeepDiff(
             self.param_schema,
-            get_sql_schema(env.get_sql_data(show_unused=True, show_invisible=True)),
+            get_sql_schema(env.get_sql_data(show_unused=True, show_invisible=False)),
         )
         if differences:
             if error:
@@ -144,7 +168,7 @@ class JBatch(dict[str, JDict]):
         env = wrap_jparam(env)
         if self.param_schema is None:
             self.param_schema = get_sql_schema(
-                env.get_sql_data(show_unused=True, show_invisible=True)
+                env.get_sql_data(show_unused=True, show_invisible=False)
             )
         else:
             self.validate_run(env)
@@ -187,7 +211,7 @@ class JPath(ABC, BaseModel):
     )
 
     @abstractmethod
-    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result: PathResult | None = None, verbose: bool = False) -> PathResult:
+    def _run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result: PathResult | None = None, path_options: PathOptions = PathOptions()) -> PathResult:
         """Implement the core logic for this path.
 
         This method must be overridden by subclasses to perform the actual work
@@ -197,7 +221,7 @@ class JPath(ABC, BaseModel):
             env: Environment of parameters used to run the path.
             subpath_results: Results from all subpaths listed in ``subpaths``.
             partial_result: Partial result from a previous run of the path, if any.
-            verbose: If ``True``, print additional diagnostic output.
+            path_options: Path options for the run.
 
         Returns:
             PathResult: Result object to be wrapped into a :class:`PathResult` by the
@@ -217,7 +241,7 @@ class JPath(ABC, BaseModel):
         """
         pass
 
-    def run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result: PathResult | None = None, verbose: bool = False):
+    def run(self, env: JDict, subpath_results: dict[str, Any], journey, partial_result: PathResult | None = None, path_options: PathOptions = PathOptions()):
         """Execute the path under a locked environment.
 
         The environment is temporarily locked to prevent accidental parameter
@@ -227,14 +251,14 @@ class JPath(ABC, BaseModel):
             env: Environment of parameters to run the path with.
             subpath_results: Results of the subpaths.
             partial_result: Partial result from a previous run of the path, if any.
-            verbose: If ``True``, print additional diagnostic output.
+            path_options: Path options for the run.
 
         Returns:
             PathResult: The result of the path.
         """
         try:
             env.lock()
-            result = self._run(env, subpath_results, journey, partial_result, verbose)
+            result = self._run(env, subpath_results, journey, partial_result, path_options)
         finally:
             env.unlock()
 

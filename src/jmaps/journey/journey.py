@@ -28,30 +28,8 @@ from jmaps.journey.jmalc import (
     DBPathVersion,
     DBResult,
 )
-from jmaps.journey.path import JPath, JBatch, PathResult, ExecutionType
+from jmaps.journey.path import JPath, JBatch, PathResult, ExecutionType, PathOptions
 from jmaps.journey.param import REF_SEP, JDict, JValue, Refer
-class PathOptions(BaseModel):
-    """Runtime options controlling path execution and caching."""
-
-    force_run_to_depth: int = Field(
-        0,
-        description=(
-            "Force the path tree to run even if cached. Most useful when a path "
-            "has been changed but outdated cached results still exist. Because "
-            "subpaths form a tree with the main path at the top, this is "
-            "specified as an integer indicating how deep the forced re-run "
-            "should propagate."
-        ),
-    )
-    disable_saving_and_loading: bool = Field(
-        False,
-        description="If true, results are not saved to or loaded from the database.",
-    )
-    plot: bool = Field(True, description="Whether to plot results after running.")
-    verbose: bool = Field(False, description="Whether to print verbose output.")
-    batch_tqdm: bool = Field(
-        True, description="Track batch progress with tqdm when running subpaths."
-    )
 
 def get_filename(hashable: dict) -> str:
     """Compute a deterministic key from a JSON-serializable mapping.
@@ -338,7 +316,7 @@ class Journey(BaseModel):
                 return partial_result, subpath_results
             # Run the path.
             result = self.paths[path_name].run(
-                local_env, subpath_results, self, partial_result=partial_result, verbose=path_options.verbose
+                local_env, subpath_results, self, partial_result=partial_result, path_options=path_options
             )
             # Save the results
             self.save_path_results(local_env, path_name, result)
@@ -356,7 +334,8 @@ class Journey(BaseModel):
                 self.session = None
                 
         env.init_run(is_parent_path=True)
-        env.replace(local_env, merge_usage=True, merge_dtypes=False)
+        env.merge_usage(local_env)
+        # env.replace(local_env, merge_usage=True, merge_dtypes=False)
         if self.session is not None:
             self.session.commit()
         return result, subpath_results
@@ -377,8 +356,8 @@ class Journey(BaseModel):
         local_env = env.model_copy(deep=True)
         result, subpath_results = self._run(local_env, path_name, path_options, is_parent=True)
         env.init_run(is_parent_path=True)
-        # env.merge_usage(local_env)
-        env.replace(local_env, merge_usage=True, merge_dtypes=False)
+        env.merge_usage(local_env)
+        # env.replace(local_env, merge_usage=True, merge_dtypes=False)
         if self.session is not None:
             self.session.commit()
         return result, subpath_results
@@ -427,6 +406,10 @@ class Journey(BaseModel):
                     action_str = "Ran"
                     # print(f"Running {path_name}.")
             subpath_options = path_options.model_copy()
+            subpath_options.plot = False
+            if not is_parent:
+                subpath_options.batch_tqdm = False
+            subpath_options.verbose = False
             subpath_options.force_run_to_depth = (
                 subpath_options.force_run_to_depth - 1
                 if subpath_options.force_run_to_depth > 0
@@ -436,7 +419,7 @@ class Journey(BaseModel):
             if result is None or not result.completed:
                 # Run the path.
                 result = self.paths[path_name].run(
-                    local_env, subpath_results, self, partial_result=result, verbose=path_options.verbose
+                    local_env, subpath_results, self, partial_result=result, path_options=path_options
                 )
                 # Save the results to cache.
                 if not path_options.disable_saving_and_loading:
@@ -495,8 +478,8 @@ class Journey(BaseModel):
                     subpath_env, subpath_name, subpath_options, is_parent=False
                 )
                 subpath_results[subpath_name] = subpath_result
-                # local_env.merge_usage(subpath_env)
-                local_env.replace(subpath_env, merge_usage=True, merge_dtypes=False)
+                local_env.merge_usage(subpath_env)
+                # local_env.replace(subpath_env, merge_usage=True, merge_dtypes=False)
             else:
                 subpath_results[subpath_name] = self.run_batch(local_env, subpath_name, batch, subpath_options)
         return subpath_results
@@ -533,8 +516,8 @@ class Journey(BaseModel):
                     for future in enumerate_futures:
                         result, batch_id, usage_env = future.result()
                         if usage_env is not None:
-                            # local_env.merge_usage(usage_env)
-                            local_env.replace(usage_env, merge_usage=True, merge_dtypes=False)
+                            local_env.merge_usage(usage_env)
+                            # local_env.replace(usage_env, merge_usage=True, merge_dtypes=False)
                         batch_results[batch_id] = result
             
             case ExecutionType.MULTIPLE_THREADS:
@@ -556,8 +539,8 @@ class Journey(BaseModel):
                     for future in enumerate_futures:
                         result, batch_id, usage_env = future.result()
                         if usage_env is not None:
-                            # local_env.merge_usage(usage_env)
-                            local_env.replace(usage_env, merge_usage=True, merge_dtypes=False)
+                            local_env.merge_usage(usage_env)
+                            # local_env.replace(usage_env, merge_usage=True, merge_dtypes=False)
                         batch_results[batch_id] = result
             
             case ExecutionType.SINGLE_PROCESS:
@@ -582,8 +565,8 @@ class Journey(BaseModel):
                     if update_local_env:
                         # These are dependent parameters, so don't count towards usage.
                         batch_env.reset_usage()
-                        # local_env.merge_usage(path_env)
-                        local_env.replace(path_env, merge_usage=True, merge_dtypes=False)
+                        local_env.merge_usage(path_env)
+                        # local_env.replace(path_env, merge_usage=True, merge_dtypes=False)
                         update_local_env = False
 
                     # Save the results of the subpath.
@@ -634,32 +617,30 @@ class Journey(BaseModel):
             if self.cache_db_meta:
                 self.db_current_path_env_schemas[path_name] = env_schema
                 self.db_current_path_file_schemas[path_name] = file_schema
-        temp_env: dict[str, Any] = {}
+        sql_env: dict[str, Any] = {}
         for param_used in env_schema.keys():
             param_path = param_used.split(REF_SEP)
             # print(param_path)
             jparam = local_env
-            dtype = None
             for i, key in enumerate(param_path):
                 while not isinstance(jparam, JDict):
                     jparam = jparam.jparam
                 if i == len(param_path) - 1:
                     if key == 'jvar':
                         # Bypass get_value to get the actual param
-                        param_value = jparam.data[key].get_value().__name__
+                        jvar = jparam.data[key].get_value()
+                        param_value = jvar.__module__ + "." + jvar.__qualname__
                     else:
-                        dtype = jparam.data[key].dtype
-                        param_value = jparam.data[key].get_value()
+                        jparam[key] # Trigger the usage of the parameter
+                        param_value = jparam.data[key].get_sql_data()
                 else:
                     jparam = jparam.data[key]
                     jparam.used = True
-            temp_env[param_used] = (
-                cast_sql_type(param_value) if dtype is None else dtype(param_value)
-            )
+            sql_env[param_used] = param_value
         result_stmt = select(DBResult).where(
             DBResult.path_name == path_name,
             DBResult.path_version_num == path_version_num,
-            DBResult.environment == temp_env,
+            DBResult.environment == sql_env,
             DBResult.created_at == Null(),
             DBResult.completed == True,
         )
@@ -682,6 +663,7 @@ class Journey(BaseModel):
             path_name: Name of the path.
             result: Results of the path run.
         """
+        print(f"Saving results for {path_name}, step {local_env['step_i']} to the database.")
         env_sql = local_env.get_sql_data(show_unused=False, show_invisible=False)
         env_schema = get_sql_schema(env_sql)
 

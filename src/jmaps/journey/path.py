@@ -99,14 +99,20 @@ class PathResult(BaseModel):
             file_path: Base path used when the results were written. If ``None``,
                 no file-backed results are loaded.
             file_schema: Schema describing how each key was written, or ``None``.
+        Returns:
+            True if the file-backed results were loaded successfully, False otherwise.
         """
         if file_schema is None or file_path is None:
             self.file = None
-            return
+            return True
         self.file = {}
         for k, v in file_schema.items():
-            self.file[k] = read(v[0], v[1], file_path.with_name(file_path.name + "_" + k))
-
+            file_item_path = file_path.with_name(file_path.name + "_" + k)
+            if list(file_item_path.parent.glob(file_item_path.name + "*")):
+                self.file[k] = read(v[0], v[1], file_item_path)
+            else:
+                return False
+        return True
 
 class JBatch(dict[str, JDict]):
     """A collection of named runs for batched subpath execution.

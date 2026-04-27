@@ -158,7 +158,7 @@ class DBResult(Base):
     id = Column(Integer, primary_key=True)
     environment = Column(JSONB, nullable=False)
     data = Column(JSONB, nullable=True)
-    file_path = Column(String, nullable=True)
+    file_name = Column(String, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), nullable=True)
     completed = Column(Boolean, nullable=False)
 

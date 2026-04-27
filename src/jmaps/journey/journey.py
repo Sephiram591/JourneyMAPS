@@ -45,7 +45,7 @@ def get_filename(hashable: dict) -> str:
     """
     dumped = json.dumps(hashable, sort_keys=True, separators=(",", ":"))
     key = hashlib.sha256(dumped.encode("utf-8")).hexdigest()
-    return key
+    return str(key)
 
 
 class Journey(BaseModel):
@@ -300,7 +300,7 @@ class Journey(BaseModel):
             partial_result = PathResult(sql=db_result.data, db_result_id=db_result.id, completed=db_result.completed)
             local_env.load_from_db_result(db_result)
             partial_result.from_file(
-                Path(db_result.file_path) if db_result.file_path is not None else None,
+                (self.result_directory / path_name / db_result.file_name) if db_result.file_name is not None else None,
                 db_result.path_version.file_schema,
             )
             subpath_options = path_options.model_copy()
@@ -649,10 +649,15 @@ class Journey(BaseModel):
             local_env.reset_usage()
             return None
         result = PathResult(sql=db_result.data, db_entry=db_result, completed=db_result.completed)
-        result.from_file(
-            Path(db_result.file_path) if db_result.file_path is not None else None,
+        file_path = (self.result_directory / path_name / db_result.file_name) if db_result.file_name is not None else None
+
+        file_loaded = result.from_file(
+            file_path,
             file_schema,
         )
+        if not file_loaded:
+            local_env.reset_usage()
+            return None
         return result
 
     def save_path_results(self, local_env: JDict, path_name: str, result: PathResult):
@@ -663,11 +668,10 @@ class Journey(BaseModel):
             path_name: Name of the path.
             result: Results of the path run.
         """
-        print(f"Saving results for {path_name}, step {local_env['step_i']} to the database.")
         env_sql = local_env.get_sql_data(show_unused=False, show_invisible=False)
         env_schema = get_sql_schema(env_sql)
-
-        file_path = self.result_directory / path_name / get_filename(env_sql)
+        file_name = get_filename(env_sql)
+        file_path = self.result_directory / path_name / file_name
         file_schema = result.to_file(file_path)
         file_schema = file_schema if file_schema is not None else Null()
         # Check if a DBPath already exists with this name.
@@ -722,7 +726,7 @@ class Journey(BaseModel):
                 data=result.sql if result.sql is not None else Null(),
                 path_name=path_name,
                 path_version_num=path_version_num,
-                file_path=str(file_path) if not isinstance(file_schema, Null) else Null(),
+                file_name=file_name if not isinstance(file_schema, Null) else Null(),
                 created_at=datetime.now(timezone.utc),
                 completed=result.completed,
             )
@@ -741,14 +745,14 @@ class Journey(BaseModel):
                     data=result.sql if result.sql is not None else Null(),
                     path_name=path_name,
                     path_version_num=path_version_num,
-                    file_path=str(file_path) if file_path is not None else Null(),
+                    file_name=file_name if not isinstance(file_schema, Null) else Null(),
                     created_at=Null(),
                     completed=result.completed,
                 )
                 self.session.add(db_result)
             else:
                 db_result.data = result.sql
-                db_result.file_path = str(file_path) if file_path is not None else None
+                db_result.file_name = file_name if not isinstance(file_schema, Null) else Null()
                 db_result.completed = result.completed
         result.db_entry = db_result
         # self.session.commit()

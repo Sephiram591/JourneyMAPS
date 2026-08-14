@@ -56,9 +56,15 @@ from .io import (
     writable,
     readable,
 )
+from .schema import (
+    RunBranchConsistencyError, 
+    _RunAstAnalyzer,
+    )
 # from .environment import JEnv
 
 __all__ = [
+    "_RunAstAnalyzer",
+    "RunBranchConsistencyError",
     "Journey",
     "get_filename",
     "JBatch",

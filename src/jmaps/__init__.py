@@ -42,6 +42,8 @@ __website_url__ = "https://camacholab.byu.edu/"
 # Public facade: expose the Journey API at the package root
 from .config import PATH
 from .journey import (
+    _RunAstAnalyzer,
+    RunBranchConsistencyError,
     Journey,
     get_filename,
     JBatch,
@@ -69,16 +71,13 @@ from .journey import (
     DBPath,
     DBPathVersion,
     DBResult,
-    # register,
-    # serialize_default,
-    # deserialize,
-    # serializable,
-    # deserializable,
 )
 from .paths import GDS_Tidy3DPath, GDS_TidyModePath
 
 __all__ = [
     "PATH",
+    "_RunAstAnalyzer",
+    "RunBranchConsistencyError",
     "Journey",
     "PathOptions",
     "get_filename",

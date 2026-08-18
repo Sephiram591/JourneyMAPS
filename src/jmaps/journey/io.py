@@ -8,16 +8,18 @@ by :class:`~jmaps.journey.path.PathResult` to persist file-based results.
 from pathlib import Path
 from typing import Any, Callable
 
-_WRITERS: dict[type, Callable[[Any, Path], None]] = {}
-_READERS: dict[type, Callable[[Path], Any]] = {}
-_RESOLVED_WRITERS: dict[type, Callable[[Any, Path], None]] = {}
+_WRITERS: dict[str, Callable[[Any, Path], None]] = {}
+_DICT_FRIENDLY_WRITER: dict[str, bool] = {}
+_READERS: dict[str, Callable[[str, Path], Any]] = {}
+_RESOLVED_WRITERS: dict[str, Callable[[Any, Path], None]] = {}
 
 
 def register(
-    cls: type,
+    cls: str,
+    dict_friendly: bool,
     *,
     writer: Callable[[Any, Path], None],
-    reader: Callable[[Path], Any],
+    reader: Callable[[str, Path], Any],
 ) -> None:
     """Register reader and writer functions for a type.
 
@@ -27,11 +29,12 @@ def register(
         reader: Callable that deserializes an instance of ``cls`` from ``file_path``.
     """
     _WRITERS[cls] = writer
+    _DICT_FRIENDLY_WRITER[cls] = dict_friendly
     _RESOLVED_WRITERS[cls] = writer
     _READERS[cls] = reader
 
 
-def write(obj: Any, file_path: Path) -> str:
+def write(obj: Any, file_path: Path) -> list[str]:
     """Write an object to disk using the best registered writer.
 
     Resolution walks the method-resolution-order (MRO) of ``type(obj)`` so that
@@ -42,7 +45,7 @@ def write(obj: Any, file_path: Path) -> str:
         file_path: Path to the target file.
 
     Returns:
-        type: The type on which the writer was originally registered.
+        list[str]: The types on which the writer was originally registered. Order is ``[writer_cls, root_cls]`` where ``writer_cls`` is the class on which the writer was registered and ``root_cls`` is the actual type of ``obj``.
 
     Raises:
         TypeError: If no writer is registered for the object's type or its parents.
@@ -67,6 +70,40 @@ def write(obj: Any, file_path: Path) -> str:
     module_path = fn(obj, file_path)
     return [f"{writer_cls.__module__}.{writer_cls.__qualname__}", f"{root_cls.__module__}.{root_cls.__qualname__}"]
 
+def get_writer(obj: Any) -> list[str]:
+    """Get the writer to write an object to disk using the best registered writer.
+
+    Resolution walks the method-resolution-order (MRO) of ``type(obj)`` so that
+    writers registered on parent classes are reused for subclasses.
+
+    Args:
+        obj: Object instance to serialize.
+        
+    Returns:
+        list[str]: The types on which the writer was originally registered. Order is ``[writer_cls, root_cls]`` where ``writer_cls`` is the class on which the writer was registered and ``root_cls`` is the actual type of ``obj``.
+
+    Raises:
+        TypeError: If no writer is registered for the object's type or its parents.
+    """
+    root_cls = type(obj)
+    writer_cls = type(obj)
+    try:
+        writer_cls = _RESOLVED_WRITERS[f"{root_cls.__module__}.{root_cls.__qualname__}"]
+        fn = _WRITERS[f"{writer_cls.__module__}.{writer_cls.__qualname__}"]
+    except KeyError:
+        for typ in root_cls.__mro__:
+            if f"{typ.__module__}.{typ.__qualname__}" in _WRITERS:
+                fn = _WRITERS[f"{typ.__module__}.{typ.__qualname__}"]
+                _RESOLVED_WRITERS[f"{root_cls.__module__}.{root_cls.__qualname__}"] = typ
+                writer_cls = typ
+                break
+        else:
+            raise TypeError(
+                f"No writer registered for {root_cls!r} or its parent classes {root_cls.__mro__}"
+            )
+
+    return [f"{writer_cls.__module__}.{writer_cls.__qualname__}", f"{root_cls.__module__}.{root_cls.__qualname__}"]
+
 
 def read(writer_cls: str, root_cls: str, file_path: Path) -> Any:
     """Read an object of the given type from disk.
@@ -89,7 +126,7 @@ def read(writer_cls: str, root_cls: str, file_path: Path) -> Any:
     return fn(root_cls, file_path)
 
 
-def writable(cls: type):
+def writable(cls: type, dict_friendly: bool):
     """Decorator registering a function as the writer for ``cls``.
 
     The decorated function must accept ``(obj, file_path)``.
@@ -103,6 +140,7 @@ def writable(cls: type):
 
     def decorator(writer_fn: Callable[[Any, Path], None]):
         _WRITERS[f"{cls.__module__}.{cls.__qualname__}"] = writer_fn
+        _DICT_FRIENDLY_WRITER[f"{cls.__module__}.{cls.__qualname__}"] = dict_friendly
         return writer_fn
 
     return decorator
@@ -121,7 +159,7 @@ def readable(cls: type):
         Callable: Decorator that registers the given reader function.
     """
 
-    def decorator(reader_fn: Callable[[Path], Any]):
+    def decorator(reader_fn: Callable[[str, Path], Any]):
         _READERS[f"{cls.__module__}.{cls.__qualname__}"] = reader_fn
         return reader_fn
 

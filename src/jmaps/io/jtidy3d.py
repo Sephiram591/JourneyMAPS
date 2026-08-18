@@ -24,7 +24,7 @@ def load_object(path: str):
 
     return obj
 
-@writable(td.components.base.Tidy3dBaseModel)
+@writable(td.components.base.Tidy3dBaseModel, dict_friendly=False)
 def tidy3d_writer(obj: td.components.base.Tidy3dBaseModel, file_path: Path) -> None:
     """Write any Python object using pickle."""
     obj.to_file(str(file_path.with_suffix(".hdf5")))

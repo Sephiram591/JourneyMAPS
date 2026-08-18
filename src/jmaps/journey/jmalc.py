@@ -13,12 +13,14 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
+    LargeBinary,
     String,
     Boolean,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from collections.abc import Sequence
 
 
 Base = declarative_base()
@@ -45,11 +47,11 @@ def get_sql_type(value):
         return "str"
     if isinstance(value, datetime):
         return "datetime"
-    if isinstance(value, list):
-        return "list"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return type(value).__name__
     raise TypeError(
         f"Value: {value}, with type {type(value)} is not a valid type for sql "
-        "(int, float, bool, str, datetime)."
+        "(int, float, bool, str, datetime, Sequence)."
     )
 
 def cast_sql_type(value):
@@ -82,26 +84,27 @@ def cast_sql_type(value):
         return value
     if isinstance(value, datetime):
         return value.timestamp()
-    if isinstance(value, list):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [cast_sql_type(v) for v in value]
     raise TypeError(
         f"Value: {value}, with type {type(value)} is not a valid type for sql "
         "(int, float, bool, str, datetime)."
     )
 
-def get_sql_schema(sql_data):
-    """Infer a flat schema for a mapping of SQL-storable values.
+def is_sql_type(value):
+    """Check if a Python value can be represented as a SQL type.
 
     Args:
-        sql_data (dict[str, object]): Mapping from parameter name to value.
+        value: Value to check.
 
     Returns:
-        dict[str, str]: Mapping from parameter name to inferred SQL type name.
+        bool: True if the value can be represented as a SQL type, False otherwise.
     """
-    schema: dict[str, str] = {}
-    for k, v in sql_data.items():
-        schema[k] = get_sql_type(v)
-    return schema
+    try:
+        get_sql_type(value)
+        return True
+    except TypeError:
+        return False
 
 
 def create_tables(engine):
@@ -127,7 +130,6 @@ class DBPath(Base):
 
     name = Column(String, primary_key=True)
     description = Column(String, nullable=True)
-    current_version = Column(Integer, nullable=True)
     versions = relationship("DBPathVersion", back_populates="path")
 
 
@@ -148,6 +150,8 @@ class DBPathVersion(Base):
     results = relationship("DBResult", back_populates="path_version")
     env_schema = Column(JSONB, nullable=False)
     file_schema = Column(JSONB, nullable=True)
+    ast_hash = Column(LargeBinary, nullable=False)
+    nondeterministic = Column(Boolean, nullable=False, default=False)
 
 
 class DBResult(Base):

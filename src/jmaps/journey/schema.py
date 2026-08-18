@@ -2,1527 +2,1657 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import textwrap
-from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Hashable, Iterable, Literal, NamedTuple, Sequence, Dict
+import logging 
+
+logger = logging.getLogger(__name__)
+
+EnvPath = tuple[Hashable, ...]
+
+try:  # DeepDiff improves diagnostics, but the analyzer remains self-contained.
+    from deepdiff import DeepDiff  # type: ignore
+except ImportError:  # pragma: no cover - exercised when DeepDiff is not installed.
+    DeepDiff = None  # type: ignore[assignment]
 
 
-class RunBranchConsistencyError(RuntimeError):
-    """Raised when ``_run`` has path-dependent env or journey usage."""
-
-    def __init__(self, analysis: dict[str, Any]) -> None:
-        violations = analysis["violations"]
-
-        self.violating_env_accesses = list(violations["env_leaves"])
-        self.violating_journey_paths = list(violations["journey_paths"])
-        self.violating_unresolved_env_accesses = list(
-            violations["unresolved_env_accesses"]
-        )
-        self.violating_unresolved_journey_paths = list(
-            violations["unresolved_journey_paths"]
-        )
-        self.analysis = analysis
-
-        sections = ["AST branch-consistency inspection of _run failed."]
-        groups = (
-            (
-                "Environment accesses not present on every path:",
-                self.violating_env_accesses,
-            ),
-            (
-                "journey.run path names not present on every path:",
-                self.violating_journey_paths,
-            ),
-            (
-                "Unresolved environment accesses not present on every path:",
-                self.violating_unresolved_env_accesses,
-            ),
-            (
-                "Unresolved journey.run path expressions not present on "
-                "every path:",
-                self.violating_unresolved_journey_paths,
-            ),
-        )
-
-        for heading, values in groups:
-            if values:
-                sections.append(heading)
-                sections.extend(f"  - {value}" for value in values)
-
-        super().__init__("\n".join(sections))
+class SchemaAnalysisError(RuntimeError):
+    """Base class for static env-schema analysis errors."""
 
 
-@dataclass(frozen=True, order=True)
-class _Event:
-    """A semantic dependency found in ``_run``."""
+class SourceUnavailableError(SchemaAnalysisError):
+    """Raised when Python source cannot be recovered for a function handle."""
 
-    kind: str
-    name: str
+
+class DynamicKeyError(SchemaAnalysisError):
+    """Raised when an env key cannot be determined statically."""
+
+
+class PathExplosionError(SchemaAnalysisError):
+    """Raised when control-flow expansion exceeds the configured path limit."""
+
+
+class DynamicSchemaError(SchemaAnalysisError):
+    """Raised when different execution paths produce different schemas.
+
+    Attributes
+    ----------
+    branch_differences
+        A list of dictionaries. Each dictionary identifies the baseline path,
+        the compared path(s), and a structural diff between their outputs.
+    """
+
+    def __init__(self, branch_differences: list[dict[str, Any]]) -> None:
+        self.branch_differences = branch_differences
+        message = self._build_message(branch_differences)
+        super().__init__(message)
+
+    @staticmethod
+    def _build_message(branch_differences: list[dict[str, Any]]) -> str:
+        lines = [
+            "Dynamic env schema detected: logical execution paths do not "
+            "produce identical EnvTree/FunctionCall outputs."
+        ]
+        for index, item in enumerate(branch_differences, start=1):
+            lines.append(f"\nDifference group {index}:")
+            lines.append(
+                "  baseline path(s): " + ", ".join(item["baseline_paths"])
+            )
+            lines.append(
+                "  compared path(s): " + ", ".join(item["compared_paths"])
+            )
+            lines.append(
+                textwrap.indent(
+                    json.dumps(item["diff"], indent=2, default=repr), "  "
+                )
+            )
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
-class _Summary:
-    """Events that may occur and must occur over a collection of paths."""
+class NodeRef:
+    """Stable reference to a node in one symbolic EnvTree."""
 
-    exists: bool
-    may: frozenset[_Event] = frozenset()
-    must: frozenset[_Event] = frozenset()
-
-
-_NONE = _Summary(False)
-_EMPTY = _Summary(True)
-_FLOW_KINDS = (
-    "normal",
-    "return",
-    "raise",
-    "break",
-    "continue",
-    "nonterminating",
-)
-
-
-def _alternate(*summaries: _Summary) -> _Summary:
-    """Combine alternative paths."""
-    present = [summary for summary in summaries if summary.exists]
-    if not present:
-        return _NONE
-
-    may: set[_Event] = set()
-    must = set(present[0].must)
-    for summary in present:
-        may.update(summary.may)
-        must.intersection_update(summary.must)
-
-    return _Summary(True, frozenset(may), frozenset(must))
-
-
-def _sequence(first: _Summary, second: _Summary) -> _Summary:
-    """Combine two pieces of control flow that execute sequentially."""
-    if not first.exists or not second.exists:
-        return _NONE
-
-    return _Summary(
-        True,
-        first.may | second.may,
-        first.must | second.must,
-    )
-
-
-def _event_summary(event: _Event | None) -> _Summary:
-    if event is None:
-        return _EMPTY
-    events = frozenset((event,))
-    return _Summary(True, events, events)
-
-
-def _empty_flow() -> dict[str, _Summary]:
-    return {kind: _NONE for kind in _FLOW_KINDS}
-
-
-def _normal_flow(summary: _Summary = _EMPTY) -> dict[str, _Summary]:
-    flow = _empty_flow()
-    flow["normal"] = summary
-    return flow
-
-
-def _single_flow(kind: str, summary: _Summary) -> dict[str, _Summary]:
-    flow = _empty_flow()
-    flow[kind] = summary
-    return flow
-
-
-def _merge_flows(*flows: dict[str, _Summary]) -> dict[str, _Summary]:
-    return {
-        kind: _alternate(*(flow[kind] for flow in flows))
-        for kind in _FLOW_KINDS
-    }
-
-
-def _prepend(prefix: _Summary, flow: dict[str, _Summary]) -> dict[str, _Summary]:
-    return {
-        kind: _sequence(prefix, summary)
-        for kind, summary in flow.items()
-    }
+    tree_id: int
+    path: tuple[Hashable, ...] = ()
 
 
 @dataclass(frozen=True)
-class _AliasValue:
-    """Possible canonical ``env`` prefixes represented by a local name."""
+class CopyOrigin:
+    """Identifies the tree node from which a symbolic deep copy was made."""
 
-    paths: frozenset[tuple[str, ...]]
-    unresolved: bool = False
-    definite: bool = True
+    tree_id: int
+    path: tuple[Hashable, ...]
 
-
-def _merge_alias_maps(
-    maps: Sequence[dict[str, _AliasValue]],
-) -> dict[str, _AliasValue]:
-    """Merge aliases from alternative control-flow paths conservatively."""
-    if not maps:
-        return {}
-
-    merged: dict[str, _AliasValue] = {}
-    all_names = set().union(*(mapping.keys() for mapping in maps))
-
-    for name in all_names:
-        values = [mapping.get(name) for mapping in maps]
-        present = [value for value in values if value is not None]
-
-        if not present:
-            continue
-
-        paths = frozenset().union(*(value.paths for value in present))
-        unresolved = any(value.unresolved for value in present)
-        definite = (
-            len(present) == len(values)
-            and all(value.definite for value in present)
-        )
-
-        if paths or unresolved:
-            merged[name] = _AliasValue(
-                paths=paths,
-                unresolved=unresolved,
-                definite=definite,
-            )
-
-    return merged
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tree_id": self.tree_id,
+            "path": [_encode_key(key) for key in self.path],
+        }
 
 
-class _EnvAliasAnnotator:
-    """
-    Attach path-sensitive ``env`` alias information to local-name loads.
+@dataclass
+class EnvNode:
+    """One node in a symbolic dictionary tree.
 
-    The pass runs before dependency analysis.  Every time a local variable is
-    assigned ``env``, an existing env alias, or a branch rooted at either, the
-    variable is associated with the corresponding canonical env prefix.  The
-    association is followed transitively for an arbitrary number of alias
-    assignments.
-
-    Alternative control-flow paths are merged conservatively.  If an alias can
-    refer to different env branches, all possible canonical prefixes are kept;
-    the later dependency analyzer therefore marks each resulting leaf as a
-    may-access rather than a must-access.
+    Parameters
+    ----------
+    key
+        The dictionary key used to reach this node from its parent. The root
+        stores a descriptive root key instead.
+    used
+        Whether this node has been used according to the analyzer's rules.
+    overwritten
+        Whether this node's value has been replaced. Once true, future reads
+        cannot change ``used`` for this node or any overwritten descendant.
+    parent
+        Parent node, or ``None`` for a tree root.
+    children
+        Child nodes keyed by their literal dictionary keys.
     """
 
-    def __init__(self, function: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        self._function = function
+    key: Hashable
+    used: bool = False
+    overwritten: bool = False
+    parent: EnvNode | None = field(default=None, repr=False, compare=False)
+    children: dict[Hashable, EnvNode] = field(default_factory=dict)
 
-    def annotate(self) -> None:
-        """Annotate the function body in execution order."""
-        self._block(
-            self._function.body,
-            {"env": _AliasValue(frozenset(((),)))},
-        )
-
-    @staticmethod
-    def _literal_string(node: ast.AST | None) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        return None
-
-    @staticmethod
-    def _literal_truth(node: ast.AST) -> bool | None:
-        if isinstance(node, ast.Constant):
-            return bool(node.value)
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            if not node.elts:
-                return False
-            if any(not isinstance(element, ast.Starred) for element in node.elts):
-                return True
-            return None
-        if isinstance(node, ast.Dict):
-            if not node.keys:
-                return False
-            if any(key is not None for key in node.keys):
-                return True
-            return None
-        return None
-
-    @staticmethod
-    def _append_key(
-        base: _AliasValue,
-        key: str | None,
-    ) -> _AliasValue:
-        if key is None:
-            return _AliasValue(
-                paths=frozenset(),
-                unresolved=True,
-                definite=base.definite,
+    def ensure_child(self, key: Hashable) -> EnvNode:
+        """Return an existing child, or create one with inherited overwrite state."""
+        child = self.children.get(key)
+        if child is None:
+            child = EnvNode(
+                key=key,
+                used=False,
+                overwritten=self.overwritten,
+                parent=self,
             )
+            self.children[key] = child
+        return child
 
-        return _AliasValue(
-            paths=frozenset(path + (key,) for path in base.paths),
-            unresolved=base.unresolved,
-            definite=base.definite,
+    def mark_used(self) -> None:
+        """Mark this node and eligible existing descendants as used.
+
+        Traversal stops at every overwritten node. Existing ``used=True``
+        values are never cleared.
+        """
+        if self.overwritten:
+            return
+        self.used = True
+        for child in self.children.values():
+            child.mark_used()
+
+    def mark_overwritten(self) -> None:
+        """Mark this node and all existing descendants as overwritten."""
+        self.overwritten = True
+        for child in self.children.values():
+            child.mark_overwritten()
+
+    def clone(self, parent: EnvNode | None = None) -> EnvNode:
+        """Deep-copy this node and its descendants while repairing parents."""
+        cloned = EnvNode(
+            key=self.key,
+            used=self.used,
+            overwritten=self.overwritten,
+            parent=parent,
+        )
+        cloned.children = {
+            key: child.clone(parent=cloned) for key, child in self.children.items()
+        }
+        return cloned
+
+    def path(self) -> tuple[Hashable, ...]:
+        """Return this node's path relative to its tree root."""
+        keys: list[Hashable] = []
+        current: EnvNode | None = self
+        while current is not None and current.parent is not None:
+            keys.append(current.key)
+            current = current.parent
+        keys.reverse()
+        return tuple(keys)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a deterministic, comparison-friendly representation."""
+        ordered_children = sorted(
+            self.children.values(), key=lambda node: _key_sort_token(node.key)
+        )
+        return {
+            "key": _encode_key(self.key),
+            "used": self.used,
+            "overwritten": self.overwritten,
+            "children": [child.to_dict() for child in ordered_children],
+        }
+
+
+@dataclass
+class EnvTree:
+    """A symbolic env dictionary or an independently tracked deep copy."""
+
+    tree_id: int
+    root: EnvNode
+    copied_from: CopyOrigin | None = None
+    reduced_to_overwrites: bool = False
+
+    def get_node(self, path: Sequence[Hashable], *, create: bool = True) -> EnvNode:
+        """Resolve a path relative to the root."""
+        node = self.root
+        for key in path:
+            if create:
+                node = node.ensure_child(key)
+            else:
+                try:
+                    node = node.children[key]
+                except KeyError as exc:
+                    raise KeyError(tuple(path)) from exc
+        return node
+
+    def clone(self) -> EnvTree:
+        """Deep-copy this complete tree."""
+        return EnvTree(
+            tree_id=self.tree_id,
+            root=self.root.clone(),
+            copied_from=self.copied_from,
+            reduced_to_overwrites=self.reduced_to_overwrites,
         )
 
-    def _resolve(
-        self,
-        node: ast.AST,
-        aliases: dict[str, _AliasValue],
-    ) -> _AliasValue | None:
-        """Resolve an expression that is itself an env object or branch."""
-        if isinstance(node, ast.Name):
-            return aliases.get(node.id)
+    def reduced_overwrite_copy(self) -> EnvTree:
+        """Snapshot only ancestor paths leading to overwritten nodes.
 
-        if isinstance(node, ast.Subscript):
-            base = self._resolve(node.value, aliases)
-            if base is None:
+        The root is always retained so the result remains a valid tree. If no
+        overwritten node exists, the reduced tree consists of the root alone.
+        """
+
+        def prune(node: EnvNode, parent: EnvNode | None, *, keep_root: bool) -> EnvNode | None:
+            kept_children: dict[Hashable, EnvNode] = {}
+            placeholder = EnvNode(
+                key=node.key,
+                used=node.used,
+                overwritten=node.overwritten,
+                parent=parent,
+            )
+            for key, child in node.children.items():
+                kept = prune(child, placeholder, keep_root=False)
+                if kept is not None:
+                    kept_children[key] = kept
+            should_keep = keep_root or node.overwritten or bool(kept_children)
+            if not should_keep:
                 return None
-            return self._append_key(base, self._literal_string(node.slice))
+            placeholder.children = kept_children
+            return placeholder
 
-        if isinstance(node, ast.Call):
-            # env_alias.get("key")
-            if (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get"
-            ):
-                base = self._resolve(node.func.value, aliases)
-                if base is None:
-                    return None
-                key_node = node.args[0] if node.args else next(
-                    (
-                        keyword.value
-                        for keyword in node.keywords
-                        if keyword.arg == "key"
-                    ),
-                    None,
-                )
-                return self._append_key(
-                    base,
-                    self._literal_string(key_node),
-                )
+        reduced_root = prune(self.root, None, keep_root=True)
+        assert reduced_root is not None
+        return EnvTree(
+            tree_id=self.tree_id,
+            root=reduced_root,
+            copied_from=self.copied_from,
+            reduced_to_overwrites=True,
+        )
 
-            # env_alias.copy()
-            if (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "copy"
-                and not node.args
-                and not node.keywords
-            ):
-                return self._resolve(node.func.value, aliases)
-
-            # copy.copy(env_alias) and copy.deepcopy(env_alias)
-            if (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "copy"
-                and node.func.attr in {"copy", "deepcopy"}
-                and len(node.args) == 1
-                and not node.keywords
-            ):
-                return self._resolve(node.args[0], aliases)
-
-            # dict(env_alias)
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "dict"
-                and len(node.args) == 1
-                and not node.keywords
-            ):
-                return self._resolve(node.args[0], aliases)
-
-        return None
-
-    @staticmethod
-    def _bound_names(node: ast.AST) -> set[str]:
-        names: set[str] = set()
-
-        def visit(target: ast.AST) -> None:
-            if isinstance(target, ast.Name):
-                names.add(target.id)
-            elif isinstance(target, (ast.Tuple, ast.List)):
-                for element in target.elts:
-                    visit(element)
-            elif isinstance(target, ast.Starred):
-                visit(target.value)
-
-        visit(node)
-        return names
-
-    def _invalidate_target(
+    def to_dict(self) -> dict[str, Any]:
+        """Return a deterministic representation suitable for DeepDiff."""
+        return {
+            "tree_id": self.tree_id,
+            "copied_from": (
+                None if self.copied_from is None else self.copied_from.to_dict()
+            ),
+            "reduced_to_overwrites": self.reduced_to_overwrites,
+            "root": self.root.to_dict(),
+        }
+    
+    def get_used_leaves(
         self,
-        node: ast.AST,
-        aliases: dict[str, _AliasValue],
-    ) -> None:
-        for name in self._bound_names(node):
-            aliases.pop(name, None)
+        env: dict[Hashable, Any] | None = None,
+    ) -> set[EnvPath]:
+        """Return typed paths for all used leaf nodes in this tree.
 
-    def _bind_target(
-        self,
-        target: ast.AST,
-        value: ast.AST,
-        aliases: dict[str, _AliasValue],
-    ) -> None:
-        """Update aliases after one assignment target is written."""
-        if isinstance(target, ast.Name):
-            resolved = self._resolve(value, aliases)
-            if resolved is None:
-                aliases.pop(target.id, None)
-            else:
-                aliases[target.id] = resolved
-            return
+        When ``env`` is supplied, a used dictionary branch is expanded to the
+        actual leaves below that branch. Path entries retain their original
+        types, so ``env["records"][1]["x"]`` is represented as
+        ``("records", 1, "x")``.
 
-        if (
-            isinstance(target, (ast.Tuple, ast.List))
-            and isinstance(value, (ast.Tuple, ast.List))
-            and len(target.elts) == len(value.elts)
-        ):
-            for child_target, child_value in zip(target.elts, value.elts):
-                self._bind_target(child_target, child_value, aliases)
-            return
+        The tree root is excluded from returned paths.
+        """
+        used_paths: set[EnvPath] = set()
+        resolve_env = env is not None
 
-        self._invalidate_target(target, aliases)
-
-    def _annotate_name(
-        self,
-        node: ast.Name,
-        aliases: dict[str, _AliasValue],
-    ) -> None:
-        if isinstance(node.ctx, ast.Load):
-            alias = aliases.get(node.id)
-            if alias is not None:
-                setattr(node, "_env_alias_value", alias)
-
-    def _expr(
-        self,
-        node: ast.AST | None,
-        aliases: dict[str, _AliasValue],
-    ) -> dict[str, _AliasValue]:
-        """Annotate an expression and return aliases after its evaluation."""
-        if node is None:
-            return aliases
-
-        if isinstance(node, ast.Name):
-            self._annotate_name(node, aliases)
-            return aliases
-
-        if isinstance(node, ast.Constant):
-            return aliases
-
-        if isinstance(node, ast.NamedExpr):
-            aliases = self._expr(node.value, aliases)
-            self._bind_target(node.target, node.value, aliases)
-            return aliases
-
-        if isinstance(node, ast.IfExp):
-            tested = self._expr(node.test, aliases)
-            truth = self._literal_truth(node.test)
-
-            if truth is True:
-                return self._expr(node.body, dict(tested))
-            if truth is False:
-                return self._expr(node.orelse, dict(tested))
-
-            body_aliases = self._expr(node.body, dict(tested))
-            else_aliases = self._expr(node.orelse, dict(tested))
-            return _merge_alias_maps((body_aliases, else_aliases))
-
-        if isinstance(node, ast.BoolOp):
-            if not node.values:
-                return aliases
-
-            current = self._expr(node.values[0], aliases)
-            for value in node.values[1:]:
-                evaluated = self._expr(value, dict(current))
-                current = _merge_alias_maps((current, evaluated))
-            return current
-
-        if isinstance(node, ast.Compare):
-            current = self._expr(node.left, aliases)
-            for index, comparator in enumerate(node.comparators):
-                evaluated = self._expr(comparator, dict(current))
-                current = (
-                    evaluated
-                    if index == 0
-                    else _merge_alias_maps((current, evaluated))
-                )
-            return current
-
-        if isinstance(node, ast.Lambda):
-            for default in node.args.defaults:
-                aliases = self._expr(default, aliases)
-            for default in node.args.kw_defaults:
-                aliases = self._expr(default, aliases)
-            return aliases
-
-        if isinstance(
-            node,
-            (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp),
-        ):
-            local = dict(aliases)
-            for generator in node.generators:
-                local = self._expr(generator.iter, local)
-                self._invalidate_target(generator.target, local)
-                for condition in generator.ifs:
-                    local = self._expr(condition, local)
-
-            if isinstance(node, ast.DictComp):
-                local = self._expr(node.key, local)
-                self._expr(node.value, local)
-            else:
-                self._expr(node.elt, local)
-
-            # Comprehension induction variables do not leak into the enclosing
-            # scope.  The outer iterable expressions above have still been
-            # annotated correctly.
-            return aliases
-
-        # Evaluate child expressions in AST field order.  Statement and pattern
-        # children are handled by the statement walker instead.
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.expr):
-                aliases = self._expr(child, aliases)
-            elif isinstance(child, ast.keyword):
-                aliases = self._expr(child.value, aliases)
-            elif isinstance(child, ast.comprehension):
-                aliases = self._expr(child.iter, aliases)
-
-        return aliases
-
-    def _pattern(
-        self,
-        node: ast.pattern,
-        aliases: dict[str, _AliasValue],
-    ) -> dict[str, _AliasValue]:
-        if isinstance(node, ast.MatchValue):
-            return self._expr(node.value, aliases)
-        if isinstance(node, ast.MatchMapping):
-            for key in node.keys:
-                aliases = self._expr(key, aliases)
-            for pattern in node.patterns:
-                aliases = self._pattern(pattern, aliases)
-            if node.rest is not None:
-                aliases.pop(node.rest, None)
-            return aliases
-        if isinstance(node, ast.MatchClass):
-            aliases = self._expr(node.cls, aliases)
-            for pattern in (*node.patterns, *node.kwd_patterns):
-                aliases = self._pattern(pattern, aliases)
-            return aliases
-        if isinstance(node, (ast.MatchSequence, ast.MatchOr)):
-            for pattern in node.patterns:
-                aliases = self._pattern(pattern, aliases)
-            return aliases
-        if isinstance(node, ast.MatchAs):
-            if node.pattern is not None:
-                aliases = self._pattern(node.pattern, aliases)
-            if node.name is not None:
-                aliases.pop(node.name, None)
-            return aliases
-        if isinstance(node, ast.MatchStar) and node.name is not None:
-            aliases.pop(node.name, None)
-        return aliases
-
-    @staticmethod
-    def _irrefutable_pattern(node: ast.pattern) -> bool:
-        if isinstance(node, ast.MatchAs):
-            return (
-                node.pattern is None
-                or _EnvAliasAnnotator._irrefutable_pattern(node.pattern)
-            )
-        if isinstance(node, ast.MatchOr):
-            return any(
-                _EnvAliasAnnotator._irrefutable_pattern(pattern)
-                for pattern in node.patterns
-            )
-        return False
-
-    def _block(
-        self,
-        statements: Sequence[ast.stmt],
-        incoming: dict[str, _AliasValue],
-    ) -> tuple[dict[str, _AliasValue], bool]:
-        aliases = dict(incoming)
-        falls_through = True
-
-        for statement in statements:
-            if not falls_through:
-                break
-            aliases, falls_through = self._statement(statement, aliases)
-
-        return aliases, falls_through
-
-    def _statement(
-        self,
-        node: ast.stmt,
-        aliases: dict[str, _AliasValue],
-    ) -> tuple[dict[str, _AliasValue], bool]:
-        if isinstance(node, ast.Expr):
-            return self._expr(node.value, aliases), True
-
-        if isinstance(node, ast.Assign):
-            aliases = self._expr(node.value, aliases)
-            for target in node.targets:
-                aliases = self._expr(target, aliases)
-            for target in node.targets:
-                self._bind_target(target, node.value, aliases)
-            return aliases, True
-
-        if isinstance(node, ast.AnnAssign):
-            aliases = self._expr(node.annotation, aliases)
-            aliases = self._expr(node.value, aliases)
-            aliases = self._expr(node.target, aliases)
-            if node.value is None:
-                self._invalidate_target(node.target, aliases)
-            else:
-                self._bind_target(node.target, node.value, aliases)
-            return aliases, True
-
-        if isinstance(node, ast.AugAssign):
-            aliases = self._expr(node.target, aliases)
-            aliases = self._expr(node.value, aliases)
-            self._invalidate_target(node.target, aliases)
-            return aliases, True
-
-        if isinstance(node, ast.Delete):
-            for target in node.targets:
-                aliases = self._expr(target, aliases)
-                self._invalidate_target(target, aliases)
-            return aliases, True
-
-        if isinstance(node, ast.Return):
-            return self._expr(node.value, aliases), False
-
-        if isinstance(node, ast.Raise):
-            aliases = self._expr(node.exc, aliases)
-            aliases = self._expr(node.cause, aliases)
-            return aliases, False
-
-        if isinstance(node, (ast.Break, ast.Continue)):
-            return aliases, False
-
-        if isinstance(node, ast.If):
-            tested = self._expr(node.test, aliases)
-            truth = self._literal_truth(node.test)
-            branches: list[dict[str, _AliasValue]] = []
-
-            if truth is not False:
-                body, body_falls = self._block(node.body, dict(tested))
-                if body_falls:
-                    branches.append(body)
-
-            if truth is not True:
-                if node.orelse:
-                    other, other_falls = self._block(
-                        node.orelse,
-                        dict(tested),
-                    )
+        def add_leaves(
+            deeper_env: dict[Hashable, Any],
+            parent_path: EnvPath,
+        ) -> None:
+            for key, value in deeper_env.items():
+                child_path = (*parent_path, key)
+                if isinstance(value, dict):
+                    add_leaves(value, child_path)
                 else:
-                    other, other_falls = dict(tested), True
-                if other_falls:
-                    branches.append(other)
+                    used_paths.add(child_path)
 
-            if not branches:
-                return tested, False
-            return _merge_alias_maps(branches), True
+        def visit(
+            node: EnvNode,
+            current_env: Any,
+            parent_path: EnvPath,
+        ) -> None:
+            for child in node.children.values():
+                child_path = (*parent_path, child.key)
+                deeper_env: Any = None
 
-        if isinstance(node, ast.Match):
-            subject_aliases = self._expr(node.subject, aliases)
-            branches: list[dict[str, _AliasValue]] = []
-            exhaustive = False
+                if resolve_env:
+                    if not isinstance(current_env, dict):
+                        raise ValueError(
+                            f"Environment path {parent_path!r} is not a "
+                            f"dictionary, so it cannot contain {child.key!r}."
+                        )
+                    if child.key not in current_env:
+                        raise ValueError(
+                            f"Key {child.key!r} does not exist at environment "
+                            f"path {parent_path!r}."
+                        )
+                    deeper_env = current_env[child.key]
 
-            for case in node.cases:
-                case_aliases = self._pattern(
-                    case.pattern,
-                    dict(subject_aliases),
-                )
-                case_aliases = self._expr(case.guard, case_aliases)
-                body_aliases, body_falls = self._block(
-                    case.body,
-                    case_aliases,
-                )
-                if body_falls:
-                    branches.append(body_aliases)
-                if (
-                    case.guard is None
-                    and self._irrefutable_pattern(case.pattern)
-                ):
-                    exhaustive = True
+                if child.used and not child.children:
+                    if resolve_env and isinstance(deeper_env, dict):
+                        add_leaves(deeper_env, child_path)
+                    else:
+                        used_paths.add(child_path)
 
-            if not exhaustive:
-                branches.append(subject_aliases)
-            if not branches:
-                return subject_aliases, False
-            return _merge_alias_maps(branches), True
+                # Always inspect descendants. A child can be used even when its
+                # parent is not, such as env["branch"]["leaf"].
+                visit(child, deeper_env, child_path)
 
-        if isinstance(node, (ast.For, ast.AsyncFor)):
-            before = self._expr(node.iter, aliases)
-            body_input = dict(before)
-            self._invalidate_target(node.target, body_input)
-            body, body_falls = self._block(node.body, body_input)
-            else_aliases, else_falls = self._block(node.orelse, dict(before))
+        visit(self.root, env, ())
+        return used_paths
 
-            branches = [before]
-            if body_falls:
-                branches.append(body)
-            if else_falls:
-                branches.append(else_aliases)
-            return _merge_alias_maps(branches), True
+    def get_overwritten_leaves(
+        self,
+        env: dict[Hashable, Any] | None = None,
+    ) -> set[EnvPath]:
+        """Return typed paths for all overwritten leaf nodes in this tree.
 
-        if isinstance(node, ast.While):
-            before = self._expr(node.test, aliases)
-            truth = self._literal_truth(node.test)
-            branches: list[dict[str, _AliasValue]] = []
+        When ``env`` is supplied, an overwritten dictionary branch is expanded
+        to the actual leaves below that branch. Path entries retain their
+        original types.
+        """
+        overwritten_paths: set[EnvPath] = set()
+        resolve_env = env is not None
 
-            if truth is not False:
-                body, body_falls = self._block(node.body, dict(before))
-                if body_falls:
-                    branches.append(body)
+        def add_leaves(
+            deeper_env: dict[Hashable, Any],
+            parent_path: EnvPath,
+        ) -> None:
+            for key, value in deeper_env.items():
+                child_path = (*parent_path, key)
+                if isinstance(value, dict):
+                    add_leaves(value, child_path)
+                else:
+                    overwritten_paths.add(child_path)
 
-            if truth is not True:
-                other, other_falls = self._block(node.orelse, dict(before))
-                if other_falls:
-                    branches.append(other)
+        def visit(
+            node: EnvNode,
+            current_env: Any,
+            parent_path: EnvPath,
+        ) -> None:
+            for child in node.children.values():
+                child_path = (*parent_path, child.key)
+                deeper_env: Any = None
 
-            # Unless the loop is statically known to execute forever, zero
-            # iterations or eventual termination preserves a pre-loop path.
-            if truth is not True:
-                branches.append(before)
+                if resolve_env:
+                    if not isinstance(current_env, dict):
+                        raise ValueError(
+                            f"Environment path {parent_path!r} is not a "
+                            f"dictionary, so it cannot contain {child.key!r}."
+                        )
+                    if child.key not in current_env:
+                        raise ValueError(
+                            f"Key {child.key!r} does not exist at environment "
+                            f"path {parent_path!r}."
+                        )
+                    deeper_env = current_env[child.key]
 
-            if not branches:
-                return before, False
-            return _merge_alias_maps(branches), True
+                if child.overwritten and not child.children:
+                    if resolve_env and isinstance(deeper_env, dict):
+                        add_leaves(deeper_env, child_path)
+                    else:
+                        overwritten_paths.add(child_path)
 
-        if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            body, body_falls = self._block(node.body, dict(aliases))
-            branches: list[dict[str, _AliasValue]] = []
+                visit(child, deeper_env, child_path)
 
-            if body_falls:
-                body_else, else_falls = self._block(node.orelse, body)
-                if else_falls:
-                    branches.append(body_else)
+        visit(self.root, env, ())
+        return overwritten_paths
+        
+    def __repr__(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, default=repr)
 
-            for handler in node.handlers:
-                handler_aliases = dict(aliases)
-                handler_aliases = self._expr(handler.type, handler_aliases)
-                if handler.name is not None:
-                    handler_aliases.pop(handler.name, None)
-                handled, handled_falls = self._block(
-                    handler.body,
-                    handler_aliases,
-                )
-                if handled_falls:
-                    branches.append(handled)
+def get_qualified_name(local_name, namespace: dict[str, Any]) -> str | None:
+    local_path = local_name.split(".")
+    obj = namespace.get(local_path[0])
+    if obj is None:
+        return None
+    for attr in local_path[1:]:
+        obj = getattr(obj, attr, None)
+        if obj is None:
+            return None
+    return f"{obj.__module__}.{obj.__qualname__}"
 
-            if not branches:
-                branches.append(dict(aliases))
+class FunctionCall(NamedTuple):
+    """A function call receiving a tracked tree root.
 
-            merged = _merge_alias_maps(branches)
-            if node.finalbody:
-                return self._block(node.finalbody, merged)
-            return merged, True
+    Fields
+    ------
+    function_name
+        Static dotted/unparsed name of the called function.
+    overwritten_tree
+        Independent reduced snapshot containing only paths to overwritten
+        nodes at the time the argument is evaluated.
+    """
 
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            current = aliases
-            for item in node.items:
-                current = self._expr(item.context_expr, current)
-                if item.optional_vars is not None:
-                    self._invalidate_target(item.optional_vars, current)
-            return self._block(node.body, current)
+    function_name: str
+    overwritten_tree: EnvTree
 
-        if isinstance(node, ast.Assert):
-            aliases = self._expr(node.test, aliases)
-            aliases = self._expr(node.msg, aliases)
-            return aliases, True
+    def to_dict(self) -> dict[str, Any]:
+        return {"function_name": self.function_name, "tree": self.overwritten_tree.to_dict()}
 
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for decorator in node.decorator_list:
-                aliases = self._expr(decorator, aliases)
-            for default in node.args.defaults:
-                aliases = self._expr(default, aliases)
-            for default in node.args.kw_defaults:
-                aliases = self._expr(default, aliases)
-            aliases.pop(node.name, None)
-            return aliases, True
+    def get_runtime_name(self, namespace: dict[str, Any]) -> str:
+        """Return the fully qualified name of the function at runtime."""
+        runtime_name = get_qualified_name(self.function_name, namespace)
+        if runtime_name is None:
+            raise ValueError(f"Function call {self.function_name} not found in globals.")
+        return runtime_name
 
-        if isinstance(node, ast.ClassDef):
-            for decorator in node.decorator_list:
-                aliases = self._expr(decorator, aliases)
-            for base in node.bases:
-                aliases = self._expr(base, aliases)
-            for keyword in node.keywords:
-                aliases = self._expr(keyword.value, aliases)
-            self._block(node.body, dict(aliases))
-            aliases.pop(node.name, None)
-            return aliases, True
-
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for item in node.names:
-                local_name = item.asname or item.name.split(".", 1)[0]
-                aliases.pop(local_name, None)
-            return aliases, True
-
-        if isinstance(node, (ast.Pass, ast.Global, ast.Nonlocal)):
-            return aliases, True
-
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.expr):
-                aliases = self._expr(child, aliases)
-        return aliases, True
+    def get_overwritten_leaves(
+        self, env: dict[Hashable, Any] | None = None
+    ) -> set[EnvPath]:
+        """Return the set of paths that are overwritten in this function call."""
+        return self.overwritten_tree.get_overwritten_leaves(env=env)
 
 
-class _RunAstAnalyzer:
-    """Perform static env/journey usage and branch-consistency analysis."""
+@dataclass
+class _AnalysisState:
+    trees: list[EnvTree]
+    active_aliases: dict[str, NodeRef]
+    function_calls: list[FunctionCall]
+    next_tree_id: int
 
-    def __init__(self, run_callable: Any) -> None:
+    def clone(self) -> _AnalysisState:
+        return _AnalysisState(
+            trees=[tree.clone() for tree in self.trees],
+            active_aliases=dict(self.active_aliases),
+            function_calls=[
+                FunctionCall(call.function_name, call.tree.clone())
+                for call in self.function_calls
+            ],
+            next_tree_id=self.next_tree_id,
+        )
+
+    def tree(self, tree_id: int) -> EnvTree:
         try:
-            run_callable = inspect.unwrap(run_callable)
-            lines, self._source_start = inspect.getsourcelines(run_callable)
-            source = textwrap.dedent("".join(lines))
-        except (OSError, TypeError) as exc:
-            raise RuntimeError(
-                "Could not retrieve the source for _run. The method must be "
-                "defined in a source-backed Python module."
+            return self.trees[tree_id]
+        except (IndexError, TypeError) as exc:
+            raise SchemaAnalysisError(f"Unknown symbolic tree id {tree_id}") from exc
+
+    def node(self, ref: NodeRef, *, create: bool = True) -> EnvNode:
+        return self.tree(ref.tree_id).get_node(ref.path, create=create)
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return only the user-requested outputs, not transient aliases."""
+        return {
+            "trees": [tree.to_dict() for tree in self.trees],
+            "function_calls": [call.to_dict() for call in self.function_calls],
+        }
+
+
+FlowStatus = Literal["normal", "return", "raise", "break", "continue"]
+
+
+@dataclass
+class _Flow:
+    state: _AnalysisState
+    status: FlowStatus = "normal"
+    provenance: tuple[str, ...] = ("entry",)
+
+    def branched(self, label: str) -> _Flow:
+        return _Flow(
+            state=self.state.clone(),
+            status=self.status,
+            provenance=(*self.provenance, label),
+        )
+
+    @property
+    def label(self) -> str:
+        return " -> ".join(self.provenance)
+
+
+@dataclass(frozen=True)
+class _ReferenceResult:
+    ref: NodeRef
+    pure_deepcopy_result: bool = False
+
+
+class _EnvSchemaAnalyzer:
+    """Path-sensitive symbolic interpreter for one function AST."""
+
+    def __init__(
+        self,
+        function: Any,
+        *,
+        env_parameter: str,
+        max_paths: int,
+        deepcopy_names: Iterable[str],
+    ) -> None:
+        self.function = inspect.unwrap(function)
+        self.env_parameter = env_parameter
+        self.max_paths = max_paths
+        self.deepcopy_names = frozenset(deepcopy_names)
+        self.function_ast, self.source_start_line = self._extract_function_ast(
+            self.function
+        )
+        self._validate_env_parameter()
+
+    def analyze(self) -> tuple[list[EnvTree], list[FunctionCall]]:
+        original_tree = EnvTree(
+            tree_id=0,
+            root=EnvNode(key=f"<root:{self.env_parameter}>"),
+        )
+        initial_state = _AnalysisState(
+            trees=[original_tree],
+            active_aliases={self.env_parameter: NodeRef(0, ())},
+            function_calls=[],
+            next_tree_id=1,
+        )
+        final_flows = self._exec_block(
+            self.function_ast.body,
+            [_Flow(state=initial_state)],
+        )
+        if not final_flows:
+            final_flows = [_Flow(state=initial_state)]
+
+        self._ensure_consistent_outputs(final_flows)
+        canonical = final_flows[0].state
+        return canonical.trees, canonical.function_calls
+
+    @staticmethod
+    def _extract_function_ast(function: Any) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, int]:
+        try:
+            source_lines, start_line = inspect.getsourcelines(function)
+        except (OSError, IOError, TypeError) as exc:
+            raise SourceUnavailableError(
+                "Could not recover source for the supplied function handle. "
+                "Define it in a .py file, or register notebook-generated source "
+                "in linecache before analysis."
             ) from exc
 
+        source = textwrap.dedent("".join(source_lines))
         try:
             module = ast.parse(source)
         except SyntaxError as exc:
-            raise RuntimeError("Could not parse the source for _run.") from exc
+            raise SourceUnavailableError("Recovered source could not be parsed.") from exc
 
-        run_name = getattr(run_callable, "__name__", "_run")
-        self._run = next(
-            (
-                node
-                for node in module.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == run_name
-            ),
-            None,
-        )
-        if self._run is None:
-            raise RuntimeError(f"Could not locate the AST node for {run_name!r}.")
+        candidates = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == getattr(function, "__name__", None)
+        ]
+        if not candidates:
+            raise SourceUnavailableError(
+                f"Could not locate AST for function {getattr(function, '__name__', function)!r}."
+            )
+        # inspect.getsource normally places the requested definition first.
+        candidates.sort(key=lambda node: (node.lineno, node.col_offset))
+        return candidates[0], start_line
 
-        _EnvAliasAnnotator(self._run).annotate()
-
-        self._parents: dict[ast.AST, ast.AST] = {}
-        for parent in ast.walk(self._run):
-            for child in ast.iter_child_nodes(parent):
-                self._parents[child] = parent
-
-    def analyze(self) -> dict[str, Any]:
-        """Analyze ``_run`` and raise once if any dependency is conditional."""
-        flow = self._block(self._run.body)
-        complete = _alternate(*(flow[kind] for kind in _FLOW_KINDS))
-        if not complete.exists:
-            complete = _EMPTY
-
-        env_names = {
-            event.name for event in complete.may if event.kind == "env"
+    def _validate_env_parameter(self) -> None:
+        args = self.function_ast.args
+        parameter_names = {
+            arg.arg
+            for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]
         }
-        env_leaf_names = {
-            name
-            for name in env_names
-            if not any(
-                other != name and other.startswith(name + ".")
-                for other in env_names
-            )
-        }
-
-        relevant = {
-            event
-            for event in complete.may
-            if event.kind != "env" or event.name in env_leaf_names
-        }
-        violations = {
-            event for event in relevant if event not in complete.must
-        }
-
-        def names(kind: str, events: Iterable[_Event]) -> tuple[str, ...]:
-            return tuple(sorted(event.name for event in events if event.kind == kind))
-
-        result = {
-            "env_leaves": tuple(sorted(env_leaf_names)),
-            "journey_paths": names("journey", relevant),
-            "unresolved_env_accesses": names("unresolved_env", relevant),
-            "unresolved_journey_paths": names("unresolved_journey", relevant),
-            "control_flow_outcomes": tuple(
-                kind for kind in _FLOW_KINDS if flow[kind].exists
-            ),
-            "violations": {
-                "env_leaves": names("env", violations),
-                "journey_paths": names("journey", violations),
-                "unresolved_env_accesses": names(
-                    "unresolved_env",
-                    violations,
-                ),
-                "unresolved_journey_paths": names(
-                    "unresolved_journey",
-                    violations,
-                ),
-            },
-        }
-
-        if violations:
-            raise RunBranchConsistencyError(result)
-        return result
-
-    def _line(self, node: ast.AST) -> int | str:
-        relative = getattr(node, "lineno", None)
-        return "?" if relative is None else self._source_start + relative - 1
-
-    @staticmethod
-    def _literal_string(node: ast.AST | None) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        return None
-
-    @staticmethod
-    def _literal_truth(node: ast.AST) -> bool | None:
-        if isinstance(node, ast.Constant):
-            return bool(node.value)
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            if not node.elts:
-                return False
-            if any(not isinstance(element, ast.Starred) for element in node.elts):
-                return True
-            return None
-        if isinstance(node, ast.Dict):
-            if not node.keys:
-                return False
-            if any(key is not None for key in node.keys):
-                return True
-            return None
-        return None
-
-    def _extract_env_path(
-        self,
-        node: ast.AST,
-    ) -> _AliasValue | None:
-        """Resolve a direct or aliased dictionary chain back to ``env``."""
-        if isinstance(node, ast.Name):
-            alias = getattr(node, "_env_alias_value", None)
-            if isinstance(alias, _AliasValue):
-                return alias
-
-            # Fallback for unusual ASTs that were not passed through the alias
-            # annotator.  In normal operation, the original env parameter is
-            # annotated just like every other alias.
-            if node.id == "env":
-                return _AliasValue(frozenset(((),)))
-
-            return None
-
-        if isinstance(node, ast.Subscript):
-            base = self._extract_env_path(node.value)
-            if base is None:
-                return None
-
-            key = self._literal_string(node.slice)
-            if key is None:
-                return _AliasValue(
-                    paths=frozenset(),
-                    unresolved=True,
-                    definite=base.definite,
-                )
-
-            return _AliasValue(
-                paths=frozenset(path + (key,) for path in base.paths),
-                unresolved=base.unresolved,
-                definite=base.definite,
+        if args.vararg is not None:
+            parameter_names.add(args.vararg.arg)
+        if args.kwarg is not None:
+            parameter_names.add(args.kwarg.arg)
+        if self.env_parameter not in parameter_names:
+            raise SchemaAnalysisError(
+                f"Function {self.function_ast.name!r} has no parameter "
+                f"named {self.env_parameter!r}."
             )
 
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-        ):
-            base = self._extract_env_path(node.func.value)
-            if base is None:
-                return None
+    def _line(self, node: ast.AST) -> int:
+        return self.source_start_line + getattr(node, "lineno", 1) - 1
 
-            key_node = node.args[0] if node.args else next(
-                (
-                    keyword.value
-                    for keyword in node.keywords
-                    if keyword.arg == "key"
-                ),
-                None,
-            )
-            key = self._literal_string(key_node)
-            if key is None:
-                return _AliasValue(
-                    paths=frozenset(),
-                    unresolved=True,
-                    definite=base.definite,
-                )
-
-            return _AliasValue(
-                paths=frozenset(path + (key,) for path in base.paths),
-                unresolved=base.unresolved,
-                definite=base.definite,
+    def _check_path_count(self, flows: Sequence[_Flow]) -> None:
+        if len(flows) > self.max_paths:
+            raise PathExplosionError(
+                f"Static control-flow expansion produced {len(flows)} paths, "
+                f"exceeding max_paths={self.max_paths}."
             )
 
-        return None
-
-    def _continues_env_chain(self, node: ast.AST) -> bool:
-        parent = self._parents.get(node)
-        if isinstance(parent, ast.Subscript) and parent.value is node:
-            return True
-        if (
-            isinstance(parent, ast.Attribute)
-            and parent.value is node
-            and parent.attr == "get"
-        ):
-            grandparent = self._parents.get(parent)
-            return isinstance(grandparent, ast.Call) and grandparent.func is parent
-        return False
-
-    def _env_summary(self, node: ast.AST) -> _Summary:
-        """Return may/must events for one terminal direct or aliased access."""
-        resolved = self._extract_env_path(node)
-        if resolved is None or self._continues_env_chain(node):
-            return _EMPTY
-
-        events: set[_Event] = {
-            _Event("env", ".".join(path))
-            for path in resolved.paths
-            if path
-        }
-
-        if resolved.unresolved:
-            events.add(
-                _Event(
-                    "unresolved_env",
-                    f"line {self._line(node)}: {ast.unparse(node)}",
-                )
-            )
-
-        if not events:
-            # A bare env object or alias is not itself a leaf access.
-            return _EMPTY
-
-        frozen_events = frozenset(events)
-
-        # One exact semantic event is guaranteed only when the expression is
-        # env-derived on every incoming path.  Multiple possible canonical
-        # prefixes represent a branch-dependent alias, so each individual leaf
-        # remains a may-access rather than a must-access.
-        must = (
-            frozen_events
-            if resolved.definite and len(frozen_events) == 1
-            else frozenset()
-        )
-
-        return _Summary(
-            exists=True,
-            may=frozen_events,
-            must=must,
-        )
-
-    def _journey_event(self, node: ast.Call) -> _Event | None:
-        if not (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "run"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "journey"
-        ):
-            return None
-
-        path_node = next(
-            (
-                keyword.value
-                for keyword in node.keywords
-                if keyword.arg == "path_name"
-            ),
-            None,
-        )
-        if path_node is None and len(node.args) >= 2:
-            path_node = node.args[1]
-
-        path = self._literal_string(path_node)
-        if path is not None:
-            return _Event("journey", path)
-
-        expression = node if path_node is None else path_node
-        return _Event(
-            "unresolved_journey",
-            f"line {self._line(expression)}: {ast.unparse(expression)}",
-        )
-
-    def _exprs(self, nodes: Iterable[ast.AST | None]) -> _Summary:
-        result = _EMPTY
-        for node in nodes:
-            if node is not None:
-                result = _sequence(result, self._expr(node))
-        return result
-
-    def _condition(self, node: ast.AST) -> tuple[_Summary, _Summary]:
-        """Return summaries for the true and false outcomes of an expression."""
-        literal = self._literal_truth(node)
-        if literal is not None:
-            evaluated = self._expr(node)
-            return (evaluated, _NONE) if literal else (_NONE, evaluated)
-
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            true, false = self._condition(node.operand)
-            return false, true
-
-        if isinstance(node, ast.BoolOp):
-            active = _EMPTY
-            completed = _NONE
-
-            if isinstance(node.op, ast.And):
-                for value in node.values:
-                    true, false = self._condition(value)
-                    completed = _alternate(
-                        completed,
-                        _sequence(active, false),
-                    )
-                    active = _sequence(active, true)
-                return active, completed
-
-            for value in node.values:
-                true, false = self._condition(value)
-                completed = _alternate(
-                    completed,
-                    _sequence(active, true),
-                )
-                active = _sequence(active, false)
-            return completed, active
-
-        if isinstance(node, ast.IfExp):
-            test_true, test_false = self._condition(node.test)
-            body_true, body_false = self._condition(node.body)
-            else_true, else_false = self._condition(node.orelse)
-            return (
-                _alternate(
-                    _sequence(test_true, body_true),
-                    _sequence(test_false, else_true),
-                ),
-                _alternate(
-                    _sequence(test_true, body_false),
-                    _sequence(test_false, else_false),
-                ),
-            )
-
-        if isinstance(node, ast.Compare):
-            active = self._expr(node.left)
-            false_paths = _NONE
-            for comparator in node.comparators:
-                evaluated = _sequence(active, self._expr(comparator))
-                false_paths = _alternate(false_paths, evaluated)
-                active = evaluated
-            return active, false_paths
-
-        if isinstance(node, ast.NamedExpr):
-            true, false = self._condition(node.value)
-            target = self._target(node.target)
-            return _sequence(true, target), _sequence(false, target)
-
-        evaluated = self._expr(node)
-        return evaluated, evaluated
-
-    def _expr(self, node: ast.AST) -> _Summary:
-        if isinstance(node, (ast.Name, ast.Constant)):
-            return _EMPTY
-
-        if isinstance(node, ast.Attribute):
-            return self._expr(node.value)
-
-        if isinstance(node, ast.Subscript):
-            return _sequence(
-                self._exprs((node.value, node.slice)),
-                self._env_summary(node),
-            )
-
-        if isinstance(node, ast.Call):
-            result = self._expr(node.func)
-            result = _sequence(result, self._exprs(node.args))
-            result = _sequence(
-                result,
-                self._exprs(keyword.value for keyword in node.keywords),
-            )
-            result = _sequence(result, self._env_summary(node))
-            return _sequence(result, _event_summary(self._journey_event(node)))
-
-        if isinstance(node, (ast.BoolOp, ast.Compare)):
-            return _alternate(*self._condition(node))
-
-        if isinstance(node, ast.IfExp):
-            test_true, test_false = self._condition(node.test)
-            return _alternate(
-                _sequence(test_true, self._expr(node.body)),
-                _sequence(test_false, self._expr(node.orelse)),
-            )
-
-        if isinstance(node, ast.NamedExpr):
-            return _sequence(self._expr(node.value), self._target(node.target))
-
-        if isinstance(node, ast.BinOp):
-            return self._exprs((node.left, node.right))
-
-        if isinstance(node, ast.UnaryOp):
-            return self._expr(node.operand)
-
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            return self._exprs(node.elts)
-
-        if isinstance(node, ast.Dict):
-            items: list[ast.AST] = []
-            for key, value in zip(node.keys, node.values):
-                if key is not None:
-                    items.append(key)
-                items.append(value)
-            return self._exprs(items)
-
-        if isinstance(node, ast.Slice):
-            return self._exprs((node.lower, node.upper, node.step))
-
-        if isinstance(node, ast.Starred):
-            return self._expr(node.value)
-
-        if isinstance(node, ast.FormattedValue):
-            return self._exprs((node.value, node.format_spec))
-
-        if isinstance(node, ast.JoinedStr):
-            return self._exprs(node.values)
-
-        if isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom)):
-            value = getattr(node, "value", None)
-            return _EMPTY if value is None else self._expr(value)
-
-        if isinstance(node, ast.Lambda):
-            return self._exprs(
-                list(node.args.defaults)
-                + [
-                    default
-                    for default in node.args.kw_defaults
-                    if default is not None
-                ]
-            )
-
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            return self._comprehension(
-                node.generators,
-                lambda: self._expr(node.elt),
-            )
-
-        if isinstance(node, ast.DictComp):
-            return self._comprehension(
-                node.generators,
-                lambda: self._exprs((node.key, node.value)),
-            )
-
-        return self._exprs(
-            child
-            for child in ast.iter_child_nodes(node)
-            if isinstance(child, ast.expr)
-        )
-
-    def _comprehension(
-        self,
-        generators: Sequence[ast.comprehension],
-        element: Callable[[], _Summary],
-    ) -> _Summary:
-        def walk(index: int) -> _Summary:
-            generator = generators[index]
-            iterable = self._expr(generator.iter)
-            result = iterable  # Zero-iteration path.
-            active = _sequence(iterable, self._target(generator.target))
-
-            for condition in generator.ifs:
-                accepted, rejected = self._condition(condition)
-                result = _alternate(result, _sequence(active, rejected))
-                active = _sequence(active, accepted)
-
-            tail = walk(index + 1) if index + 1 < len(generators) else element()
-            return _alternate(result, _sequence(active, tail))
-
-        return walk(0)
-
-    def _target(self, node: ast.AST) -> _Summary:
-        if isinstance(node, ast.Name):
-            return _EMPTY
-        if isinstance(node, (ast.Tuple, ast.List)):
-            return self._exprs(node.elts)
-        if isinstance(node, ast.Starred):
-            return self._target(node.value)
-        if isinstance(node, ast.Attribute):
-            return self._expr(node.value)
-        if isinstance(node, ast.Subscript):
-            return _sequence(
-                self._exprs((node.value, node.slice)),
-                self._env_summary(node),
-            )
-        return _EMPTY
-
-    def _block(self, statements: Sequence[ast.stmt]) -> dict[str, _Summary]:
-        flow = _normal_flow()
+    def _exec_block(self, statements: Sequence[ast.stmt], flows: list[_Flow]) -> list[_Flow]:
+        current = flows
         for statement in statements:
-            prefix = flow["normal"]
-            carried = dict(flow)
-            carried["normal"] = _NONE
-            if prefix.exists:
-                flow = _merge_flows(
-                    carried,
-                    _prepend(prefix, self._statement(statement)),
-                )
-            else:
-                flow = carried
-        return flow
-
-    def _statement(self, node: ast.stmt) -> dict[str, _Summary]:
-        if isinstance(node, ast.Expr):
-            return _normal_flow(self._expr(node.value))
-
-        if isinstance(node, ast.Assign):
-            summary = self._expr(node.value)
-            for target in node.targets:
-                summary = _sequence(summary, self._target(target))
-            return _normal_flow(summary)
-
-        if isinstance(node, ast.AnnAssign):
-            summary = _EMPTY if node.value is None else self._expr(node.value)
-            return _normal_flow(_sequence(summary, self._target(node.target)))
-
-        if isinstance(node, ast.AugAssign):
-            return _normal_flow(
-                self._exprs((node.target, node.value))
-            )
-
-        if isinstance(node, ast.Delete):
-            return _normal_flow(self._exprs(node.targets))
-
-        if isinstance(node, ast.Return):
-            summary = _EMPTY if node.value is None else self._expr(node.value)
-            return _single_flow("return", summary)
-
-        if isinstance(node, ast.Raise):
-            return _single_flow("raise", self._exprs((node.exc, node.cause)))
-
-        if isinstance(node, ast.Break):
-            return _single_flow("break", _EMPTY)
-
-        if isinstance(node, ast.Continue):
-            return _single_flow("continue", _EMPTY)
-
-        if isinstance(node, ast.If):
-            true, false = self._condition(node.test)
-            return _merge_flows(
-                _prepend(true, self._block(node.body)),
-                _prepend(false, self._block(node.orelse)),
-            )
-
-        if isinstance(node, ast.Match):
-            return self._match(node)
-
-        if isinstance(node, (ast.For, ast.AsyncFor)):
-            return self._for_loop(node)
-
-        if isinstance(node, ast.While):
-            return self._while_loop(node)
-
-        if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            return self._try(node)
-
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            prefix = _EMPTY
-            for item in node.items:
-                prefix = _sequence(prefix, self._expr(item.context_expr))
-                if item.optional_vars is not None:
-                    prefix = _sequence(prefix, self._target(item.optional_vars))
-            return _prepend(prefix, self._block(node.body))
-
-        if isinstance(node, ast.Assert):
-            true, false = self._condition(node.test)
-            failed = false
-            if node.msg is not None:
-                failed = _sequence(failed, self._expr(node.msg))
-            return _merge_flows(
-                _normal_flow(true),
-                _single_flow("raise", failed),
-            )
-
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            defaults = list(node.args.defaults) + [
-                default
-                for default in node.args.kw_defaults
-                if default is not None
-            ]
-            return _normal_flow(
-                self._exprs(list(node.decorator_list) + defaults)
-            )
-
-        if isinstance(node, ast.ClassDef):
-            prefix = self._exprs(
-                list(node.decorator_list)
-                + list(node.bases)
-                + [keyword.value for keyword in node.keywords]
-            )
-            return _prepend(prefix, self._block(node.body))
-
-        if isinstance(
-            node,
-            (ast.Pass, ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal),
-        ):
-            return _normal_flow()
-
-        return _normal_flow(
-            self._exprs(
-                child
-                for child in ast.iter_child_nodes(node)
-                if isinstance(child, ast.expr)
-            )
-        )
-
-    def _match(self, node: ast.Match) -> dict[str, _Summary]:
-        unmatched = self._expr(node.subject)
-        output = _empty_flow()
-
-        for case in node.cases:
-            attempted = _sequence(unmatched, self._pattern(case.pattern))
-            matched = attempted
-            unmatched = _NONE if self._irrefutable(case.pattern) else attempted
-
-            if case.guard is not None:
-                guard_true, guard_false = self._condition(case.guard)
-                output = _merge_flows(
-                    output,
-                    _prepend(
-                        _sequence(matched, guard_true),
-                        self._block(case.body),
-                    ),
-                )
-                unmatched = _alternate(
-                    unmatched,
-                    _sequence(matched, guard_false),
-                )
-            else:
-                output = _merge_flows(
-                    output,
-                    _prepend(matched, self._block(case.body)),
-                )
-
-        return _merge_flows(output, _normal_flow(unmatched))
-
-    def _pattern(self, node: ast.pattern) -> _Summary:
-        if isinstance(node, ast.MatchValue):
-            return self._expr(node.value)
-        if isinstance(node, ast.MatchMapping):
-            result = self._exprs(node.keys)
-            for pattern in node.patterns:
-                result = _sequence(result, self._pattern(pattern))
-            return result
-        if isinstance(node, ast.MatchClass):
-            result = self._expr(node.cls)
-            for pattern in (*node.patterns, *node.kwd_patterns):
-                result = _sequence(result, self._pattern(pattern))
-            return result
-        if isinstance(node, (ast.MatchSequence, ast.MatchOr)):
-            result = _EMPTY
-            for pattern in node.patterns:
-                result = _sequence(result, self._pattern(pattern))
-            return result
-        if isinstance(node, ast.MatchAs) and node.pattern is not None:
-            return self._pattern(node.pattern)
-        return _EMPTY
-
-    def _irrefutable(self, node: ast.pattern) -> bool:
-        if isinstance(node, ast.MatchAs):
-            return node.pattern is None or self._irrefutable(node.pattern)
-        if isinstance(node, ast.MatchOr):
-            return any(self._irrefutable(pattern) for pattern in node.patterns)
-        return False
-
-    def _for_loop(self, node: ast.For | ast.AsyncFor) -> dict[str, _Summary]:
-        iterable = self._expr(node.iter)
-        zero = _prepend(iterable, self._block(node.orelse))
-        one_prefix = _sequence(iterable, self._target(node.target))
-        body = _prepend(one_prefix, self._block(node.body))
-        output = zero
-
-        for kind, summary in body.items():
-            if not summary.exists:
-                continue
-            if kind in {"normal", "continue"}:
-                branch = _prepend(summary, self._block(node.orelse))
-            elif kind == "break":
-                branch = _normal_flow(summary)
-            else:
-                branch = _single_flow(kind, summary)
-            output = _merge_flows(output, branch)
-
-        return output
-
-    def _while_loop(self, node: ast.While) -> dict[str, _Summary]:
-        true, false = self._condition(node.test)
-        output = _prepend(false, self._block(node.orelse))
-        body = _prepend(true, self._block(node.body))
-        literal = self._literal_truth(node.test)
-
-        for kind, summary in body.items():
-            if not summary.exists:
-                continue
-            if kind == "break":
-                branch = _normal_flow(summary)
-            elif kind in {"normal", "continue"}:
-                if literal is True:
-                    branch = _single_flow("nonterminating", summary)
+            next_flows: list[_Flow] = []
+            for flow in current:
+                if flow.status == "normal":
+                    next_flows.extend(self._exec_stmt(statement, flow))
                 else:
-                    exit_prefix = _sequence(summary, false)
-                    branch = _prepend(exit_prefix, self._block(node.orelse))
+                    next_flows.append(flow)
+            self._check_path_count(next_flows)
+            current = next_flows
+        return current
+
+    def _exec_stmt(self, statement: ast.stmt, flow: _Flow) -> list[_Flow]:
+        state = flow.state
+
+        if isinstance(statement, ast.Assign):
+            self._handle_assignment(statement.targets, statement.value, state)
+            return [flow]
+
+        if isinstance(statement, ast.AnnAssign):
+            # A value-less local annotation does not rebind the existing name.
+            if statement.value is not None:
+                self._handle_assignment([statement.target], statement.value, state)
+            if statement.annotation is not None:
+                self._process_expr(statement.annotation, state)
+            return [flow]
+
+        if isinstance(statement, ast.AugAssign):
+            # Per the requested rules, replacing a tracked node is an overwrite,
+            # not a read, even though Python's runtime augmented assignment reads.
+            self._handle_overwrite_target(statement.target, state)
+            self._process_expr(statement.value, state)
+            return [flow]
+
+        if isinstance(statement, ast.Expr):
+            self._process_expr(statement.value, state)
+            return [flow]
+
+        if isinstance(statement, ast.Delete):
+            for target in statement.targets:
+                self._handle_delete_target(target, state)
+            return [flow]
+
+        if isinstance(statement, ast.Return):
+            self._process_expr(statement.value, state)
+            flow.status = "return"
+            return [flow]
+
+        if isinstance(statement, ast.Raise):
+            self._process_expr(statement.exc, state)
+            self._process_expr(statement.cause, state)
+            flow.status = "raise"
+            return [flow]
+
+        if isinstance(statement, ast.Assert):
+            self._process_expr(statement.test, state)
+            self._process_expr(statement.msg, state)
+            return [flow]
+
+        if isinstance(statement, ast.If):
+            self._process_expr(statement.test, state)
+            line = self._line(statement)
+            body_flow = flow.branched(f"if@{line}:body")
+            else_flow = flow.branched(f"if@{line}:else")
+            body_outputs = self._exec_block(statement.body, [body_flow])
+            else_outputs = self._exec_block(statement.orelse, [else_flow])
+            return [*body_outputs, *else_outputs]
+
+        if isinstance(statement, (ast.For, ast.AsyncFor)):
+            return self._exec_for(statement, flow)
+
+        if isinstance(statement, ast.While):
+            return self._exec_while(statement, flow)
+
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
+            for item in statement.items:
+                self._process_expr(item.context_expr, state)
+                if item.optional_vars is not None:
+                    self._invalidate_target_aliases(item.optional_vars, state)
+            return self._exec_block(statement.body, [flow])
+
+        if isinstance(statement, ast.Match):
+            return self._exec_match(statement, flow)
+
+        if isinstance(statement, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            return self._exec_try(statement, flow)
+
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # A nested function body is not executed when defined. Decorators,
+            # defaults, and annotations are evaluated now and therefore count.
+            for decorator in statement.decorator_list:
+                self._process_expr(decorator, state)
+            for default in [*statement.args.defaults, *statement.args.kw_defaults]:
+                self._process_expr(default, state)
+            for arg in [
+                *statement.args.posonlyargs,
+                *statement.args.args,
+                *statement.args.kwonlyargs,
+            ]:
+                self._process_expr(arg.annotation, state)
+            self._process_expr(statement.returns, state)
+            state.active_aliases.pop(statement.name, None)
+            return [flow]
+
+        if isinstance(statement, ast.ClassDef):
+            for decorator in statement.decorator_list:
+                self._process_expr(decorator, state)
+            for base in statement.bases:
+                self._process_expr(base, state)
+            for keyword in statement.keywords:
+                self._process_expr(keyword.value, state)
+            state.active_aliases.pop(statement.name, None)
+            return [flow]
+
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                state.active_aliases.pop(bound, None)
+            return [flow]
+
+        if isinstance(statement, ast.Break):
+            flow.status = "break"
+            return [flow]
+
+        if isinstance(statement, ast.Continue):
+            flow.status = "continue"
+            return [flow]
+
+        if isinstance(statement, (ast.Pass, ast.Global, ast.Nonlocal)):
+            return [flow]
+
+        # Generic fallback: process executable expression children without
+        # descending into nested statement blocks a second time.
+        for child in ast.iter_child_nodes(statement):
+            if isinstance(child, ast.expr):
+                self._process_expr(child, state)
+        return [flow]
+
+    def _exec_for(self, statement: ast.For | ast.AsyncFor, flow: _Flow) -> list[_Flow]:
+        state = flow.state
+        self._process_expr(statement.iter, state)
+        line = self._line(statement)
+
+        zero = flow.branched(f"for@{line}:zero-iterations")
+        one = flow.branched(f"for@{line}:one-or-more-iterations")
+        self._invalidate_target_aliases(statement.target, one.state)
+
+        zero_outputs = self._exec_block(statement.orelse, [zero])
+        one_outputs = self._exec_block(statement.body, [one])
+
+        normalized: list[_Flow] = []
+        for candidate in one_outputs:
+            if candidate.status == "break":
+                candidate.status = "normal"
+                candidate.provenance = (*candidate.provenance, "loop-break")
+                normalized.append(candidate)
+            elif candidate.status == "continue":
+                candidate.status = "normal"
+                candidate.provenance = (*candidate.provenance, "loop-continue/exhaust")
+                normalized.extend(self._exec_block(statement.orelse, [candidate]))
+            elif candidate.status == "normal":
+                normalized.extend(self._exec_block(statement.orelse, [candidate]))
             else:
-                branch = _single_flow(kind, summary)
-            output = _merge_flows(output, branch)
+                normalized.append(candidate)
+        return [*zero_outputs, *normalized]
 
-        return output
+    def _exec_while(self, statement: ast.While, flow: _Flow) -> list[_Flow]:
+        state = flow.state
+        self._process_expr(statement.test, state)
+        line = self._line(statement)
 
-    def _try(self, node: Any) -> dict[str, _Summary]:
-        body = self._block(node.body)
-        output = _empty_flow()
+        zero = flow.branched(f"while@{line}:zero-iterations")
+        one = flow.branched(f"while@{line}:one-or-more-iterations")
+        zero_outputs = self._exec_block(statement.orelse, [zero])
+        one_outputs = self._exec_block(statement.body, [one])
 
-        output = _merge_flows(
-            output,
-            _prepend(body["normal"], self._block(node.orelse)),
-        )
-        for kind in ("return", "break", "continue", "nonterminating"):
-            output = _merge_flows(output, _single_flow(kind, body[kind]))
+        normalized: list[_Flow] = []
+        for candidate in one_outputs:
+            if candidate.status == "break":
+                candidate.status = "normal"
+                candidate.provenance = (*candidate.provenance, "loop-break")
+                normalized.append(candidate)
+            elif candidate.status == "continue":
+                candidate.status = "normal"
+                candidate.provenance = (*candidate.provenance, "loop-continue/exhaust")
+                normalized.extend(self._exec_block(statement.orelse, [candidate]))
+            elif candidate.status == "normal":
+                normalized.extend(self._exec_block(statement.orelse, [candidate]))
+            else:
+                normalized.append(candidate)
+        return [*zero_outputs, *normalized]
 
-        if body["raise"].exists:
-            output = _merge_flows(output, self._handlers(node, body["raise"]))
+    def _exec_match(self, statement: ast.Match, flow: _Flow) -> list[_Flow]:
+        self._process_expr(statement.subject, flow.state)
+        line = self._line(statement)
+        outputs: list[_Flow] = []
 
-        # Conservatively include an exception path that reaches a handler
-        # before the try suite completes normally.
-        if node.handlers:
-            output = _merge_flows(output, self._handlers(node, _EMPTY))
+        for index, case in enumerate(statement.cases):
+            case_flow = flow.branched(f"match@{line}:case-{index}")
+            self._invalidate_pattern_bindings(case.pattern, case_flow.state)
+            self._process_pattern_values(case.pattern, case_flow.state)
+            self._process_expr(case.guard, case_flow.state)
+            outputs.extend(self._exec_block(case.body, [case_flow]))
 
-        if node.finalbody:
-            output = self._finally(output, self._block(node.finalbody))
-        return output
+        if not self._match_is_exhaustive(statement.cases):
+            outputs.append(flow.branched(f"match@{line}:no-match"))
+        return outputs
 
-    def _handlers(self, node: Any, prefix: _Summary) -> dict[str, _Summary]:
-        if not node.handlers:
-            return _single_flow("raise", prefix)
+    def _exec_try(self, statement: ast.Try, flow: _Flow) -> list[_Flow]:
+        line = self._line(statement)
 
-        output = _empty_flow()
-        for handler in node.handlers:
-            handler_prefix = prefix
-            if handler.type is not None:
-                handler_prefix = _sequence(
-                    handler_prefix,
-                    self._expr(handler.type),
-                )
-            output = _merge_flows(
-                output,
-                _prepend(handler_prefix, self._block(handler.body)),
+        success = flow.branched(f"try@{line}:body-success")
+        success_outputs = self._exec_block(statement.body, [success])
+        with_else: list[_Flow] = []
+        for candidate in success_outputs:
+            if candidate.status == "normal":
+                with_else.extend(self._exec_block(statement.orelse, [candidate]))
+            else:
+                with_else.append(candidate)
+
+        handler_outputs: list[_Flow] = []
+        for index, handler in enumerate(statement.handlers):
+            handler_flow = flow.branched(f"try@{line}:except-{index}")
+            self._process_expr(handler.type, handler_flow.state)
+            if handler.name:
+                handler_flow.state.active_aliases.pop(handler.name, None)
+            handler_outputs.extend(self._exec_block(handler.body, [handler_flow]))
+
+        alternatives = [*with_else, *handler_outputs]
+        if not statement.handlers:
+            alternatives = with_else
+
+        if statement.finalbody:
+            alternatives = self._apply_finally(statement.finalbody, alternatives)
+        return alternatives
+
+    def _apply_finally(
+        self, finalbody: Sequence[ast.stmt], flows: Sequence[_Flow]
+    ) -> list[_Flow]:
+        outputs: list[_Flow] = []
+        for flow in flows:
+            incoming_status = flow.status
+            temporary = _Flow(
+                state=flow.state,
+                status="normal",
+                provenance=(*flow.provenance, "finally"),
             )
-        return output
+            final_outputs = self._exec_block(finalbody, [temporary])
+            for candidate in final_outputs:
+                if candidate.status == "normal":
+                    candidate.status = incoming_status
+                outputs.append(candidate)
+        return outputs
 
-    def _finally(
+    def _handle_assignment(
         self,
-        incoming: dict[str, _Summary],
-        finalbody: dict[str, _Summary],
-    ) -> dict[str, _Summary]:
-        output = _empty_flow()
-        for original_kind, prefix in incoming.items():
-            if not prefix.exists:
+        targets: Sequence[ast.expr],
+        value: ast.expr,
+        state: _AnalysisState,
+    ) -> None:
+        # Python evaluates the RHS before rebinding name targets. Resolve it
+        # first so expressions such as ``alias = alias + 1`` still see the old
+        # active alias. Exact tracked references are classified without usage.
+        reference = self._eval_reference(value, state)
+        all_simple_names = all(isinstance(target, ast.Name) for target in targets)
+
+        if all_simple_names:
+            if reference is None:
+                self._process_expr(value, state)
+                for target in targets:
+                    assert isinstance(target, ast.Name)
+                    state.active_aliases.pop(target.id, None)
+            else:
+                # Pure name-to-node assignment is alias creation and never use.
+                for target in targets:
+                    assert isinstance(target, ast.Name)
+                    state.active_aliases[target.id] = reference.ref
+            return
+
+        # Pre-mark only dictionary slots that are already known aliases. This
+        # suppresses reads of the overwritten node on the same line without
+        # prematurely rebinding names in tuple/list targets before the RHS.
+        premarked_targets: set[int] = set()
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                self._premark_assignment_overwrites(
+                    target, state, premarked_targets
+                )
+
+        if reference is None:
+            self._process_expr(value, state)
+        elif not reference.pure_deepcopy_result:
+            state.node(reference.ref).mark_used()
+
+        # Python applies assignment targets after evaluating the RHS. Direct
+        # name targets can become aliases; names nested in unpacking targets
+        # cannot be assumed to receive the complete tracked value.
+        for target in targets:
+            if isinstance(target, ast.Name):
+                if reference is None:
+                    state.active_aliases.pop(target.id, None)
+                else:
+                    state.active_aliases[target.id] = reference.ref
+            else:
+                self._finish_assignment_target(
+                    target, state, premarked_targets
+                )
+
+    def _premark_assignment_overwrites(
+        self,
+        target: ast.expr,
+        state: _AnalysisState,
+        premarked_targets: set[int],
+    ) -> None:
+        """Mark tracked slot targets before RHS usage analysis."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._premark_assignment_overwrites(
+                    element, state, premarked_targets
+                )
+            return
+        if isinstance(target, ast.Starred):
+            self._premark_assignment_overwrites(
+                target.value, state, premarked_targets
+            )
+            return
+        if isinstance(target, ast.Subscript):
+            reference = self._eval_reference(target, state)
+            if reference is not None:
+                state.node(reference.ref).mark_overwritten()
+                premarked_targets.add(id(target))
+
+    def _finish_assignment_target(
+        self,
+        target: ast.expr,
+        state: _AnalysisState,
+        premarked_targets: set[int],
+    ) -> None:
+        """Apply a non-name assignment target after RHS evaluation."""
+        if isinstance(target, ast.Name):
+            state.active_aliases.pop(target.id, None)
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._finish_assignment_target(
+                    element, state, premarked_targets
+                )
+            return
+        if isinstance(target, ast.Starred):
+            self._finish_assignment_target(
+                target.value, state, premarked_targets
+            )
+            return
+        if isinstance(target, ast.Subscript):
+            if id(target) in premarked_targets:
+                return
+            reference = self._eval_reference(target, state)
+            if reference is not None:
+                state.node(reference.ref).mark_overwritten()
+            else:
+                self._process_expr(target.value, state)
+                self._process_expr(target.slice, state)
+            return
+        if isinstance(target, ast.Attribute):
+            self._process_expr(target.value, state)
+            return
+        self._invalidate_target_aliases(target, state)
+
+    def _handle_overwrite_target(self, target: ast.expr, state: _AnalysisState) -> None:
+        if isinstance(target, ast.Name):
+            # Rebinding a Python variable overrides an alias; it does not mutate
+            # the symbolic dictionary node to which the alias used to point.
+            state.active_aliases.pop(target.id, None)
+            return
+
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._handle_overwrite_target(element, state)
+            return
+
+        if isinstance(target, ast.Starred):
+            self._handle_overwrite_target(target.value, state)
+            return
+
+        if isinstance(target, ast.Subscript):
+            reference = self._eval_reference(target, state)
+            if reference is not None:
+                state.node(reference.ref).mark_overwritten()
+                return
+            # Untracked container assignment can still use env in its base/key.
+            self._process_expr(target.value, state)
+            self._process_expr(target.slice, state)
+            return
+
+        if isinstance(target, ast.Attribute):
+            # Assigning an attribute mutates the object stored in a node, not
+            # the dictionary slot itself, so the base expression is a usage.
+            self._process_expr(target.value, state)
+            return
+
+        self._invalidate_target_aliases(target, state)
+
+    def _handle_delete_target(self, target: ast.expr, state: _AnalysisState) -> None:
+        if isinstance(target, ast.Name):
+            state.active_aliases.pop(target.id, None)
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._handle_delete_target(element, state)
+            return
+        if isinstance(target, ast.Subscript):
+            reference = self._eval_reference(target, state)
+            if reference is not None:
+                state.node(reference.ref).mark_overwritten()
+                return
+        self._handle_overwrite_target(target, state)
+
+    def _invalidate_target_aliases(self, target: ast.AST, state: _AnalysisState) -> None:
+        if isinstance(target, ast.Name):
+            state.active_aliases.pop(target.id, None)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._invalidate_target_aliases(element, state)
+        elif isinstance(target, ast.Starred):
+            self._invalidate_target_aliases(target.value, state)
+        elif isinstance(target, ast.Subscript):
+            self._handle_overwrite_target(target, state)
+        elif isinstance(target, ast.Attribute):
+            self._process_expr(target.value, state)
+
+    def _process_expr(self, expression: ast.AST | None, state: _AnalysisState) -> None:
+        if expression is None:
+            return
+
+        if isinstance(expression, ast.NamedExpr):
+            reference = self._eval_reference(expression.value, state)
+            if isinstance(expression.target, ast.Name):
+                if reference is None:
+                    # The old alias remains visible while the value is evaluated.
+                    self._process_expr(expression.value, state)
+                    state.active_aliases.pop(expression.target.id, None)
+                else:
+                    state.active_aliases[expression.target.id] = reference.ref
+            else:
+                self._handle_overwrite_target(expression.target, state)
+                if reference is None:
+                    self._process_expr(expression.value, state)
+                elif not reference.pure_deepcopy_result:
+                    state.node(reference.ref).mark_used()
+            return
+
+        reference = self._eval_reference(expression, state)
+        if reference is not None:
+            if not reference.pure_deepcopy_result:
+                state.node(reference.ref).mark_used()
+            return
+
+        if isinstance(expression, ast.Call):
+            self._process_call(expression, state)
+            return
+
+        if isinstance(expression, ast.Lambda):
+            # Merely creating a lambda does not execute its body.
+            return
+
+        if isinstance(expression, ast.IfExp):
+            # Expression-level branching is analyzed conservatively in place.
+            # The statement-level path engine handles the control-flow forms
+            # explicitly required by the API.
+            self._process_expr(expression.test, state)
+            left = state.clone()
+            right = state.clone()
+            self._process_expr(expression.body, left)
+            self._process_expr(expression.orelse, right)
+            self._merge_expression_branches(state, left, right, expression)
+            return
+
+        if isinstance(expression, ast.BoolOp):
+            # Every operand is a possible evaluated operand. Analyze each so no
+            # access is silently omitted; statement-level branching remains the
+            # source of DynamicSchemaError path diagnostics.
+            for value in expression.values:
+                self._process_expr(value, state)
+            return
+
+        if isinstance(expression, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            self._process_comprehension(expression, state)
+            return
+
+        if isinstance(expression, ast.DictComp):
+            for generator in expression.generators:
+                self._process_expr(generator.iter, state)
+                for condition in generator.ifs:
+                    self._process_expr(condition, state)
+            self._process_expr(expression.key, state)
+            self._process_expr(expression.value, state)
+            return
+
+        # For regular expressions, recursively analyze expression children. A
+        # nested maximal env reference is consumed by the recursive call, so a
+        # chain such as env['a']['b'] marks only the final node, not 'a'.
+        for child in ast.iter_child_nodes(expression):
+            if isinstance(child, ast.expr):
+                self._process_expr(child, state)
+            elif isinstance(child, ast.comprehension):
+                self._process_expr(child.iter, state)
+                for condition in child.ifs:
+                    self._process_expr(condition, state)
+
+    def _process_comprehension(
+        self,
+        expression: ast.ListComp | ast.SetComp | ast.GeneratorExp,
+        state: _AnalysisState,
+    ) -> None:
+        for generator in expression.generators:
+            self._process_expr(generator.iter, state)
+            for condition in generator.ifs:
+                self._process_expr(condition, state)
+        self._process_expr(expression.elt, state)
+
+    def _merge_expression_branches(
+        self,
+        destination: _AnalysisState,
+        left: _AnalysisState,
+        right: _AnalysisState,
+        expression: ast.IfExp,
+    ) -> None:
+        left_snapshot = left.snapshot()
+        right_snapshot = right.snapshot()
+        if left_snapshot != right_snapshot:
+            diff = _make_diff(left_snapshot, right_snapshot)
+            line = self._line(expression)
+            details = [
+                {
+                    "baseline_paths": [f"if-expression@{line}:body"],
+                    "compared_paths": [f"if-expression@{line}:else"],
+                    "diff": diff,
+                }
+            ]
+            error = DynamicSchemaError(details)
+            logger.error("%s", error)
+            raise error
+        replacement = left.clone()
+        destination.trees = replacement.trees
+        destination.active_aliases = replacement.active_aliases
+        destination.function_calls = replacement.function_calls
+        destination.next_tree_id = replacement.next_tree_id
+
+    def _process_call(self, call: ast.Call, state: _AnalysisState) -> None:
+        function_name = _call_name(call.func)
+
+        # The callable expression itself may use a tracked node, e.g.
+        # env['factory'](...). It is not a root argument.
+        self._process_expr(call.func, state)
+
+        for argument in call.args:
+            if isinstance(argument, ast.Starred):
+                self._process_expr(argument.value, state)
                 continue
-            executed = _prepend(prefix, finalbody)
-            for final_kind, summary in executed.items():
-                if not summary.exists:
-                    continue
-                outcome = original_kind if final_kind == "normal" else final_kind
-                output = _merge_flows(output, _single_flow(outcome, summary))
-        return output
+            self._process_call_argument(argument, function_name, state)
+
+        for keyword in call.keywords:
+            if keyword.arg is None:  # **mapping
+                self._process_expr(keyword.value, state)
+            else:
+                self._process_call_argument(keyword.value, function_name, state)
+
+    def _process_call_argument(
+        self,
+        argument: ast.expr,
+        function_name: str,
+        state: _AnalysisState,
+    ) -> None:
+        reference = self._eval_reference(argument, state)
+        if reference is None:
+            self._process_expr(argument, state)
+            return
+
+        if reference.ref.path == ():
+            tree = state.tree(reference.ref.tree_id)
+            state.function_calls.append(
+                FunctionCall(function_name, tree.reduced_overwrite_copy())
+            )
+            return
+
+        # Only roots receive the special FunctionCall treatment. Passing a branch
+        # is a normal use of that branch.
+        if not reference.pure_deepcopy_result:
+            state.node(reference.ref).mark_used()
+
+    def _eval_reference(
+        self, expression: ast.AST, state: _AnalysisState
+    ) -> _ReferenceResult | None:
+        """Resolve an expression that evaluates exactly to a tracked node.
+
+        This method builds missing schema nodes but never marks usage. It may
+        create a new independent EnvTree when the expression is a recognized
+        ``deepcopy`` call.
+        """
+        if isinstance(expression, ast.Name):
+            ref = state.active_aliases.get(expression.id)
+            return None if ref is None else _ReferenceResult(ref)
+
+        if isinstance(expression, ast.NamedExpr) and isinstance(
+            expression.target, ast.Name
+        ):
+            value = self._eval_reference(expression.value, state)
+            if value is None:
+                return None
+            state.active_aliases[expression.target.id] = value.ref
+            return value
+
+        if isinstance(expression, ast.Subscript):
+            base = self._eval_reference(expression.value, state)
+            if base is None:
+                return None
+            key = _literal_key(expression.slice, line=self._line(expression))
+            parent = state.node(base.ref)
+            parent.ensure_child(key)
+            return _ReferenceResult(
+                NodeRef(base.ref.tree_id, (*base.ref.path, key)),
+                pure_deepcopy_result=False,
+            )
+
+        if isinstance(expression, ast.Call):
+            if self._is_deepcopy_call(expression):
+                if not expression.args:
+                    return None
+                source = self._eval_reference(expression.args[0], state)
+                if source is None:
+                    return None
+                # Additional arguments are still direct arguments to deepcopy,
+                # so apply the ordinary root-pass rule to each of them.
+                deepcopy_name = _call_name(expression.func)
+                for extra in expression.args[1:]:
+                    if isinstance(extra, ast.Starred):
+                        self._process_expr(extra.value, state)
+                    else:
+                        self._process_call_argument(extra, deepcopy_name, state)
+                for keyword in expression.keywords:
+                    if keyword.arg is None:
+                        self._process_expr(keyword.value, state)
+                    else:
+                        self._process_call_argument(
+                            keyword.value, deepcopy_name, state
+                        )
+                # deepcopy is itself a function call. Under the requested rule,
+                # passing a tracked root records a FunctionCall in addition to
+                # creating the independent copied tree. Deepcopying a branch is
+                # not a root pass and therefore creates no FunctionCall.
+                if source.ref.path == ():
+                    source_tree = state.tree(source.ref.tree_id)
+                    state.function_calls.append(
+                        FunctionCall(
+                            deepcopy_name,
+                            source_tree.reduced_overwrite_copy(),
+                        )
+                    )
+                new_ref = self._create_deepcopy(source.ref, state)
+                return _ReferenceResult(new_ref, pure_deepcopy_result=True)
+
+            if self._is_tracked_get_call(expression):
+                attribute = expression.func
+                assert isinstance(attribute, ast.Attribute)
+                base = self._eval_reference(attribute.value, state)
+                if base is None:
+                    return None
+                key = _literal_key(expression.args[0], line=self._line(expression))
+                state.node(base.ref).ensure_child(key)
+                return _ReferenceResult(
+                    NodeRef(base.ref.tree_id, (*base.ref.path, key)),
+                    pure_deepcopy_result=False,
+                )
+
+        return None
+
+    def _create_deepcopy(self, source_ref: NodeRef, state: _AnalysisState) -> NodeRef:
+        source_node = state.node(source_ref)
+        new_id = state.next_tree_id
+        state.next_tree_id += 1
+        new_tree = EnvTree(
+            tree_id=new_id,
+            root=source_node.clone(parent=None),
+            copied_from=CopyOrigin(source_ref.tree_id, source_ref.path),
+        )
+        # IDs are deliberately contiguous so list index and tree_id coincide.
+        if new_id != len(state.trees):
+            raise SchemaAnalysisError(
+                "Internal tree-id invariant failed while creating deepcopy."
+            )
+        state.trees.append(new_tree)
+        return NodeRef(new_id, ())
+
+    def _is_deepcopy_call(self, call: ast.Call) -> bool:
+        return _call_name(call.func) in self.deepcopy_names
+
+    def _is_tracked_get_call(self, call: ast.Call) -> bool:
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "get"
+            and len(call.args) == 1
+            and not call.keywords
+            and self._eval_reference_without_side_effects(call.func.value) is not None
+        )
+
+    def _eval_reference_without_side_effects(self, expression: ast.AST) -> bool | None:
+        """Syntactic precheck used only to recognize potential tracked .get calls."""
+        if isinstance(expression, ast.Name):
+            return True
+        if isinstance(expression, ast.Subscript):
+            return self._eval_reference_without_side_effects(expression.value)
+        if isinstance(expression, ast.Call) and self._is_deepcopy_call(expression):
+            return True
+        return None
+
+    def _invalidate_pattern_bindings(
+        self, pattern: ast.pattern, state: _AnalysisState
+    ) -> None:
+        for name in _pattern_bound_names(pattern):
+            state.active_aliases.pop(name, None)
+
+    def _process_pattern_values(
+        self, pattern: ast.pattern, state: _AnalysisState
+    ) -> None:
+        if isinstance(pattern, ast.MatchValue):
+            self._process_expr(pattern.value, state)
+        elif isinstance(pattern, ast.MatchClass):
+            self._process_expr(pattern.cls, state)
+            for child in [*pattern.patterns, *pattern.kwd_patterns]:
+                self._process_pattern_values(child, state)
+        elif isinstance(pattern, ast.MatchMapping):
+            for key in pattern.keys:
+                self._process_expr(key, state)
+            for child in pattern.patterns:
+                self._process_pattern_values(child, state)
+        elif isinstance(pattern, ast.MatchSequence):
+            for child in pattern.patterns:
+                self._process_pattern_values(child, state)
+        elif isinstance(pattern, ast.MatchOr):
+            for child in pattern.patterns:
+                self._process_pattern_values(child, state)
+        elif isinstance(pattern, ast.MatchAs) and pattern.pattern is not None:
+            self._process_pattern_values(pattern.pattern, state)
+
+    @staticmethod
+    def _match_is_exhaustive(cases: Sequence[ast.match_case]) -> bool:
+        if not cases:
+            return False
+        last = cases[-1]
+        if last.guard is not None:
+            return False
+        pattern = last.pattern
+        # ``case _`` and an unguarded capture pattern are irrefutable.
+        return isinstance(pattern, ast.MatchAs) and pattern.pattern is None
+
+    def _ensure_consistent_outputs(self, flows: Sequence[_Flow]) -> None:
+        groups: list[dict[str, Any]] = []
+        for flow in flows:
+            snapshot = flow.state.snapshot()
+            matching = next(
+                (group for group in groups if group["snapshot"] == snapshot), None
+            )
+            if matching is None:
+                groups.append({"snapshot": snapshot, "paths": [flow.label]})
+            else:
+                matching["paths"].append(flow.label)
+
+        if len(groups) <= 1:
+            return
+
+        baseline = groups[0]
+        differences: list[dict[str, Any]] = []
+        for group in groups[1:]:
+            differences.append(
+                {
+                    "baseline_paths": baseline["paths"],
+                    "compared_paths": group["paths"],
+                    "diff": _make_diff(baseline["snapshot"], group["snapshot"]),
+                }
+            )
+
+        error = DynamicSchemaError(differences)
+        logger.error("%s", error)
+        raise error
+
+
+def analyze_env_schema(
+    function: Any,
+    *,
+    env_parameter: str = "env",
+    max_paths: int = 256,
+    deepcopy_names: Iterable[str] = ("copy.deepcopy", "deepcopy"),
+) -> tuple[list[EnvTree], list[FunctionCall]]:
+    """Statically analyze how a function accesses an env dictionary tree.
+
+    Parameters
+    ----------
+    function
+        Function or unbound-method handle whose source can be recovered with
+        :mod:`inspect`.
+    env_parameter
+        Name of the parameter representing the root dictionary.
+    max_paths
+        Maximum number of symbolic execution paths allowed after expanding
+        control flow.
+    deepcopy_names
+        Static call names treated as deep-copy operations. The defaults support
+        both ``copy.deepcopy(env)`` and ``from copy import deepcopy``.
+
+    Returns
+    -------
+    trees, function_calls
+        ``trees`` contains the original symbolic env plus every independently
+        tracked deep copy. ``function_calls`` contains snapshots for every direct
+        function argument that is a tracked tree root.
+
+    Raises
+    ------
+    DynamicSchemaError
+        If different logical execution paths finish with different tree/call
+        outputs.
+    DynamicKeyError
+        If a tracked dictionary access uses a non-literal key.
+    SourceUnavailableError
+        If source code cannot be recovered from the function handle.
+
+    Notes
+    -----
+    The analyzer recognizes literal subscription keys and ``tracked.get(key)``
+    with exactly one literal argument. It treats direct root arguments specially
+    as requested; branches passed to functions are ordinary uses. Loops are
+    conservatively expanded as zero iterations versus one-or-more iterations.
+    """
+    analyzer = _EnvSchemaAnalyzer(
+        function,
+        env_parameter=env_parameter,
+        max_paths=max_paths,
+        deepcopy_names=deepcopy_names,
+    )
+    return analyzer.analyze()
+
+
+def analysis_to_dict(
+    trees: Sequence[EnvTree], calls: Sequence[FunctionCall]
+) -> dict[str, Any]:
+    """Convert analyzer output to plain deterministic dictionaries."""
+    return {
+        "trees": [tree.to_dict() for tree in trees],
+        "function_calls": [call.to_dict() for call in calls],
+    }
+
+
+def print_analysis(trees: Sequence[EnvTree], calls: Sequence[FunctionCall]) -> None:
+    """Pretty-print analyzer output."""
+    print(json.dumps(analysis_to_dict(trees, calls), indent=2, default=repr))
+
+
+def _literal_key(node: ast.AST, *, line: int) -> Hashable:
+    try:
+        key = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError) as exc:
+        expression = ast.unparse(node) if hasattr(ast, "unparse") else ast.dump(node)
+        raise DynamicKeyError(
+            f"Env key at line {line} is not statically literal: {expression}"
+        ) from exc
+    try:
+        hash(key)
+    except TypeError as exc:
+        raise DynamicKeyError(
+            f"Env key at line {line} is not hashable: {key!r}"
+        ) from exc
+    return key
+
+
+def _call_name(function: ast.expr) -> str:
+    if isinstance(function, ast.Name):
+        return function.id
+    if isinstance(function, ast.Attribute):
+        parts: list[str] = []
+        current: ast.AST = function
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+            return ".".join(reversed(parts))
+    try:
+        return ast.unparse(function)
+    except Exception:  # pragma: no cover - ast.unparse is available on 3.9+.
+        return ast.dump(function, include_attributes=False)
+
+
+def _pattern_bound_names(pattern: ast.pattern) -> set[str]:
+    names: set[str] = set()
+    if isinstance(pattern, ast.MatchAs):
+        if pattern.name is not None:
+            names.add(pattern.name)
+        if pattern.pattern is not None:
+            names.update(_pattern_bound_names(pattern.pattern))
+    elif isinstance(pattern, ast.MatchStar):
+        if pattern.name is not None:
+            names.add(pattern.name)
+    elif isinstance(pattern, ast.MatchMapping):
+        if pattern.rest is not None:
+            names.add(pattern.rest)
+        for child in pattern.patterns:
+            names.update(_pattern_bound_names(child))
+    elif isinstance(pattern, ast.MatchSequence):
+        for child in pattern.patterns:
+            names.update(_pattern_bound_names(child))
+    elif isinstance(pattern, ast.MatchClass):
+        for child in [*pattern.patterns, *pattern.kwd_patterns]:
+            names.update(_pattern_bound_names(child))
+    elif isinstance(pattern, ast.MatchOr):
+        for child in pattern.patterns:
+            names.update(_pattern_bound_names(child))
+    return names
+
+
+def _key_sort_token(key: Hashable) -> tuple[str, str]:
+    return type(key).__name__, repr(key)
+
+
+def _encode_key(key: Hashable) -> dict[str, str]:
+    return {"type": type(key).__name__, "repr": repr(key)}
+
+
+def _make_diff(left: Any, right: Any) -> Any:
+    if DeepDiff is not None:
+        diff = DeepDiff(left, right, ignore_order=False, verbose_level=2)
+        try:
+            return diff.to_dict()
+        except AttributeError:  # pragma: no cover - compatibility fallback.
+            return dict(diff)
+    return {"fallback_structural_diff": _structural_diff(left, right)}
+
+
+def _structural_diff(left: Any, right: Any, path: str = "root") -> list[dict[str, Any]]:
+    differences: list[dict[str, Any]] = []
+    if type(left) is not type(right):
+        return [
+            {
+                "path": path,
+                "kind": "type_changed",
+                "left": type(left).__name__,
+                "right": type(right).__name__,
+            }
+        ]
+
+    if isinstance(left, dict):
+        left_keys = set(left)
+        right_keys = set(right)
+        for key in sorted(left_keys - right_keys, key=repr):
+            differences.append(
+                {"path": f"{path}[{key!r}]", "kind": "removed", "left": left[key]}
+            )
+        for key in sorted(right_keys - left_keys, key=repr):
+            differences.append(
+                {"path": f"{path}[{key!r}]", "kind": "added", "right": right[key]}
+            )
+        for key in sorted(left_keys & right_keys, key=repr):
+            differences.extend(
+                _structural_diff(left[key], right[key], f"{path}[{key!r}]")
+            )
+        return differences
+
+    if isinstance(left, list):
+        common = min(len(left), len(right))
+        for index in range(common):
+            differences.extend(
+                _structural_diff(left[index], right[index], f"{path}[{index}]")
+            )
+        for index in range(common, len(left)):
+            differences.append(
+                {"path": f"{path}[{index}]", "kind": "removed", "left": left[index]}
+            )
+        for index in range(common, len(right)):
+            differences.append(
+                {"path": f"{path}[{index}]", "kind": "added", "right": right[index]}
+            )
+        return differences
+
+    if left != right:
+        differences.append(
+            {"path": path, "kind": "value_changed", "left": left, "right": right}
+        )
+    return differences
+
+
+
+
+class FunctionalNormalizer(ast.NodeTransformer):
+    """
+    Normalize a Python function AST by removing source-level details that
+    do not affect its basic computational structure.
+    """
+
+    def visit_FunctionDef(self, node):
+        # Function name itself does not affect the function body.
+        node.name = "<function>"
+
+        # Decorators affect how the function object is constructed, but if
+        # we're comparing the function implementation itself, ignore them.
+        node.decorator_list = []
+
+        # Remove docstring.
+        if (
+            node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            node.body.pop(0)
+
+        self.generic_visit(node)
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        node.name = "<function>"
+        node.decorator_list = []
+
+        if (
+            node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            node.body.pop(0)
+
+        self.generic_visit(node)
+        return node
+
+
+def normalized_function_ast(func):
+    """
+    Return a normalized AST representation of a function.
+
+    Ignores:
+        - Whitespace
+        - Comments
+        - Formatting
+        - Function name
+        - Docstring
+        - Decorators
+        - Source locations / line numbers
+
+    Parameters
+    ----------
+    func : callable
+        Function handle to normalize.
+
+    Returns
+    -------
+    str
+        Canonical AST representation of the function.
+    """
+    source = textwrap.dedent(inspect.getsource(func))
+    tree = ast.parse(source)
+
+    tree = FunctionalNormalizer().visit(tree)
+    ast.fix_missing_locations(tree)
+
+    return ast.dump(
+        tree,
+        annotate_fields=True,
+        include_attributes=False,
+    )

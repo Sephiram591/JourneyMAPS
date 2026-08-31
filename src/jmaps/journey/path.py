@@ -1,14 +1,24 @@
+from __future__ import annotations
+
+import importlib
 import inspect
 from functools import update_wrapper
 from typing import Any, Callable, Generic, ParamSpec, TypeVar, Dict, Tuple, Protocol, overload, Hashable
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pydantic import BaseModel, Field
 from pathlib import Path
 from datetime import datetime, timezone
 from jmaps.journey.io import read, write
+from jmaps.journey.containers import (
+    ContainerDecodingError,
+    DEFAULT_CONTAINER_REGISTRY,
+    MISSING_ENV_VALUE,
+    contains_missing_environment_values,
+    deserialize_reduced_environment,
+    register_container_adapter,
+    serialize_reduced_environment,
+)
 from jmaps.journey.jmalc import (
-    cast_sql_type,
-    get_sql_type,
     is_sql_type,
     create_tables,
     DBPath,
@@ -70,44 +80,313 @@ def get_filename(hashable: dict) -> str:
     return str(key)
 
 class JBuffer(dict):
-    def __init__(
-        self, jvar, *args, **kwargs
-    ):
-        """Initialize a :class:`JBuffer`.
+    """Deferred callable whose argument values participate in env schemas.
 
-        Args:
-            jvar: Function or callable object to invoke.
-            *args: Positional arguments (possibly :class:`JParam` instances).
-            reset_condition: Rule governing when to reevaluate the callable.
-            **kwargs: Keyword arguments (possibly :class:`JParam` instances).
+    ``args`` and ``kwargs`` are ordinary contained data. The callable reference,
+    argument ordering, and variadic-argument information are structural and are
+    persisted only in ``env_schema`` by the externally registered adapter below.
+    """
+
+    _DATA_KEYS = ("args", "kwargs")
+
+    def __init__(self, jvar: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        """Bind ``args`` and ``kwargs`` to an importable callable.
+
+        Parameters
+        ----------
+        jvar
+            Module-level callable to invoke. It must be recoverable from its
+            ``__module__`` and ``__qualname__`` so a persisted environment can
+            reconstruct the buffer in a later process.
+        *args, **kwargs
+            Values supplied to ``jvar``. They may contain nested ``JBuffer``
+            objects or any other registered environment containers.
         """
         super().__init__()
-        sig = inspect.signature(jvar)
-        binding = sig.bind(*args, **kwargs)
-        catchall_name = None
-        for name, param in sig.parameters.items():
-            if param.kind == inspect.Parameter.VAR_KEYWORD:
-                catchall_name = name
-        self['args_list'] = [k for k in binding.arguments if k not in binding.kwargs and k != catchall_name]
-        self['kwargs_list'] = [k for k in binding.kwargs]
-        self.update({k: binding.arguments[k] for k in self['args_list']})
-        self.update({k: binding.kwargs[k] for k in self['kwargs_list']})
-        self.jvar = jvar
-        self['jvar'] = self.jvar.__module__ + "." + self.jvar.__qualname__
 
-    def __call__(self):
-        def evaluate(obj):
-            if isinstance(obj, JBuffer):
-                return obj()
-            elif isinstance(obj, dict):
-                return {k: evaluate(v) for k, v in obj.items()}
-            elif isinstance(obj, Sequence) and not isinstance(obj, (str, bytes)):
-                return type(obj)(evaluate(v) for v in obj)
+        module_name, qualname = _get_importable_callable_reference(jvar)
+        signature = inspect.signature(jvar)
+        binding = signature.bind(*args, **kwargs)
+        bound_kwargs = binding.kwargs
+
+        var_positional_name: str | None = None
+        var_keyword_name: str | None = None
+        for name, parameter in signature.parameters.items():
+            if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+                var_positional_name = name
+            elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                var_keyword_name = name
+
+        # BoundArguments.args canonicalizes all values that can safely be passed
+        # positionally. Keep their parameter names so users can address leaves
+        # by name while env_schema preserves the required call order.
+        args_order = tuple(
+            name
+            for name in binding.arguments
+            if name not in bound_kwargs and name != var_keyword_name
+        )
+        kwargs_order = tuple(bound_kwargs)
+
+        self.jvar = jvar
+        self._jvar_module = module_name
+        self._jvar_qualname = qualname
+        self._args_order = args_order
+        self._kwargs_order = kwargs_order
+        self._var_positional_name = var_positional_name
+
+        self["args"] = {
+            name: binding.arguments[name]
+            for name in args_order
+        }
+        self["kwargs"] = {
+            name: bound_kwargs[name]
+            for name in kwargs_order
+        }
+
+        # This is a convenient runtime description, but the adapter deliberately
+        # excludes it from reduced_env. The authoritative copy is schema metadata.
+        self["jvar"] = f"{module_name}.{qualname}"
+
+    def __call__(self) -> Any:
+        """Recursively evaluate contained buffers and invoke ``jvar``."""
+        args_data = self.get("args", MISSING_ENV_VALUE)
+        kwargs_data = self.get("kwargs", MISSING_ENV_VALUE)
+
+        if (
+            args_data is MISSING_ENV_VALUE
+            or kwargs_data is MISSING_ENV_VALUE
+            or contains_missing_environment_values(args_data)
+            or contains_missing_environment_values(kwargs_data)
+        ):
+            raise ValueError(
+                "Cannot call a sparse JBuffer reconstructed from an environment "
+                "that did not save every argument value."
+            )
+        if not isinstance(args_data, Mapping):
+            raise TypeError("JBuffer['args'] must be a mapping.")
+        if not isinstance(kwargs_data, Mapping):
+            raise TypeError("JBuffer['kwargs'] must be a mapping.")
+
+        active_container_ids: set[int] = set()
+
+        def evaluate(value: Any) -> Any:
+            if isinstance(value, JBuffer):
+                return value()
+
+            adapter = DEFAULT_CONTAINER_REGISTRY.for_value(value)
+            if adapter is None:
+                return value
+
+            object_id = id(value)
+            if object_id in active_container_ids:
+                raise ValueError("Cyclic container encountered in JBuffer arguments.")
+
+            active_container_ids.add(object_id)
+            try:
+                evaluated_children = [
+                    (selector, evaluate(child))
+                    for selector, child in adapter.iter_children(value)
+                ]
+                return adapter.build(
+                    evaluated_children,
+                    adapter.get_metadata(value),
+                )
+            finally:
+                active_container_ids.remove(object_id)
+
+        positional_args: list[Any] = []
+        for name in self._args_order:
+            try:
+                value = evaluate(args_data[name])
+            except KeyError as exc:
+                raise ValueError(
+                    f"Cannot call sparse JBuffer: positional argument "
+                    f"{name!r} was not saved."
+                ) from exc
+
+            if name == self._var_positional_name:
+                try:
+                    positional_args.extend(value)
+                except TypeError as exc:
+                    raise TypeError(
+                        f"JBuffer variadic positional argument {name!r} must "
+                        "evaluate to an iterable."
+                    ) from exc
             else:
-                return obj
-        eval_kwargs = {k: evaluate(self[k]) for k in self['kwargs_list']}
-        eval_args = [evaluate(self[k]) for k in self['args_list']]
-        return self['jvar'](*eval_args, **eval_kwargs)
+                positional_args.append(value)
+
+        keyword_args: dict[str, Any] = {}
+        for name in self._kwargs_order:
+            try:
+                keyword_args[name] = evaluate(kwargs_data[name])
+            except KeyError as exc:
+                raise ValueError(
+                    f"Cannot call sparse JBuffer: keyword argument "
+                    f"{name!r} was not saved."
+                ) from exc
+
+        # self['jvar'] is a persisted name string; self.jvar is the callable.
+        return self.jvar(*positional_args, **keyword_args)
+
+
+def _resolve_qualified_callable(module_name: str, qualname: str) -> Callable[..., Any]:
+    """Resolve an importable callable from schema metadata."""
+    if not module_name or not qualname or "<locals>" in qualname:
+        raise ValueError(
+            "JBuffer callables must be module-level importable objects; local "
+            "functions, lambdas, and closures are not reversible."
+        )
+
+    obj: Any = importlib.import_module(module_name)
+    for component in qualname.split("."):
+        obj = getattr(obj, component)
+    if not callable(obj):
+        raise TypeError(f"{module_name}.{qualname} does not resolve to a callable.")
+    return obj
+
+
+def _same_callable(left: Callable[..., Any], right: Callable[..., Any]) -> bool:
+    """Compare functions and bound class methods without accepting instance methods."""
+    if left is right:
+        return True
+    if inspect.ismethod(left) and inspect.ismethod(right):
+        return left.__func__ is right.__func__ and left.__self__ is right.__self__
+    return False
+
+
+def _get_importable_callable_reference(
+    jvar: Callable[..., Any],
+) -> tuple[str, str]:
+    """Return and validate the durable reference used in env_schema."""
+    module_name = getattr(jvar, "__module__", None)
+    qualname = getattr(jvar, "__qualname__", None)
+    if not isinstance(module_name, str) or not isinstance(qualname, str):
+        raise TypeError(
+            "JBuffer requires a callable with string __module__ and "
+            "__qualname__ attributes."
+        )
+
+    resolved = _resolve_qualified_callable(module_name, qualname)
+    if not _same_callable(jvar, resolved):
+        raise TypeError(
+            f"JBuffer callable {module_name}.{qualname} is not recoverable as "
+            "the same callable. Bound instance methods are not supported."
+        )
+    return module_name, qualname
+
+
+def _jbuffer_iter_children(value: JBuffer):
+    """Expose only original argument data as container children."""
+    return (
+        ("args", dict.__getitem__(value, "args")),
+        ("kwargs", dict.__getitem__(value, "kwargs")),
+    )
+
+
+def _jbuffer_normalize_selector(value: JBuffer, selector: Any) -> str:
+    """Restrict addressable JBuffer entries to value-bearing children."""
+    if selector not in JBuffer._DATA_KEYS:
+        raise KeyError(selector)
+    return selector
+
+
+def _jbuffer_get_child(value: JBuffer, selector: Any) -> Any:
+    selector = _jbuffer_normalize_selector(value, selector)
+    return dict.__getitem__(value, selector)
+
+
+def _jbuffer_metadata(value: JBuffer) -> Mapping[str, Any]:
+    """Return reconstruction information stored exclusively in env_schema."""
+    return {
+        "jvar_module": value._jvar_module,
+        "jvar_qualname": value._jvar_qualname,
+        "args_order": list(value._args_order),
+        "kwargs_order": list(value._kwargs_order),
+        "var_positional_name": value._var_positional_name,
+    }
+
+
+def _metadata_name_tuple(metadata: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    raw = metadata.get(key)
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise ContainerDecodingError(
+            f"JBuffer schema metadata {key!r} must be a list of strings."
+        )
+    if len(raw) != len(set(raw)):
+        raise ContainerDecodingError(
+            f"JBuffer schema metadata {key!r} contains duplicate names."
+        )
+    return tuple(raw)
+
+
+def _build_jbuffer(
+    children: Sequence[tuple[Any, Any]],
+    metadata: Mapping[str, Any],
+) -> JBuffer:
+    """Rebuild complete or sparse JBuffer data without invoking __init__."""
+    module_name = metadata.get("jvar_module")
+    qualname = metadata.get("jvar_qualname")
+    if not isinstance(module_name, str) or not isinstance(qualname, str):
+        raise ContainerDecodingError(
+            "JBuffer schema metadata must contain string jvar_module and "
+            "jvar_qualname values."
+        )
+
+    args_order = _metadata_name_tuple(metadata, "args_order")
+    kwargs_order = _metadata_name_tuple(metadata, "kwargs_order")
+    if set(args_order) & set(kwargs_order):
+        raise ContainerDecodingError(
+            "JBuffer args_order and kwargs_order may not overlap."
+        )
+
+    var_positional_name = metadata.get("var_positional_name")
+    if var_positional_name is not None and not isinstance(var_positional_name, str):
+        raise ContainerDecodingError(
+            "JBuffer var_positional_name must be a string or None."
+        )
+    child_map: dict[str, Any] = {}
+    for selector, child in children:
+        if selector not in JBuffer._DATA_KEYS:
+            raise ContainerDecodingError(
+                f"Unexpected JBuffer child selector {selector!r}."
+            )
+        if selector in child_map:
+            raise ContainerDecodingError(
+                f"Duplicate JBuffer child selector {selector!r}."
+            )
+        child_map[selector] = child
+
+    jvar = _resolve_qualified_callable(module_name, qualname)
+
+    # Sparse reconstruction cannot call JBuffer.__init__, because omitted
+    # argument subtrees are intentionally unavailable. Build the invariant
+    # directly and mark absent top-level data children explicitly.
+    buffer = JBuffer.__new__(JBuffer)
+    dict.__init__(buffer)
+    buffer.jvar = jvar
+    buffer._jvar_module = module_name
+    buffer._jvar_qualname = qualname
+    buffer._args_order = args_order
+    buffer._kwargs_order = kwargs_order
+    buffer._var_positional_name = var_positional_name
+    buffer["args"] = child_map.get("args", MISSING_ENV_VALUE)
+    buffer["kwargs"] = child_map.get("kwargs", MISSING_ENV_VALUE)
+    buffer["jvar"] = f"{module_name}.{qualname}"
+    return buffer
+
+
+# Exact-type post-registration is necessary because the built-in dict adapter
+# deliberately does not claim subclasses with potentially different invariants.
+register_container_adapter(
+    JBuffer,
+    type_id="jmaps.journey.path.JBuffer.v1",
+    iter_children=_jbuffer_iter_children,
+    get_child=_jbuffer_get_child,
+    normalize_selector=_jbuffer_normalize_selector,
+    get_metadata=_jbuffer_metadata,
+    build=_build_jbuffer,
+    replace=True,
+)
 
 class PathOptions(BaseModel):
     """Runtime options controlling path execution and caching."""
@@ -392,67 +671,29 @@ class JPath(Generic[P, R]):
     def evaluate_schema(
         self,
         env: dict[Hashable, Any],
-    ) -> Tuple[Dict, Dict]:
-        """Evaluate the schema of the wrapped function against ``env``.
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build a reversible schema and sparse JSONB environment payload.
 
-        Leaf paths are typed tuples rather than dotted strings. For example,
-        ``env["records"][1]["x"]`` is represented internally as
-        ``("records", 1, "x")`` so integer keys are preserved.
+        Every container on a used path records its adapter type and all
+        reconstruction metadata in ``env_schema``. ``reduced_env`` is only a
+        nested dictionary of selected SQL/JSON-compatible leaf values; list,
+        tuple, and custom-container nodes are represented as dictionaries until
+        restored through ``env_schema``.
         """
-        env_schema: dict[Hashable, Any] = {}
-        reduced_env: dict[Hashable, Any] = {}
+        used_leaves = self.get_used_leaves(env=env)
+        return serialize_reduced_environment(env, used_leaves)
 
-        def add_path_to_schema(path: EnvPath) -> None:
-            if not path:
-                raise ValueError("Environment leaf paths cannot be empty.")
-
-            current_schema = env_schema
-            current_env: Any = env
-            current_reduced_env = reduced_env
-
-            for key in path[:-1]:
-                if not isinstance(current_env, dict):
-                    raise ValueError(
-                        f"Environment path {path!r} traverses through a "
-                        f"non-dictionary value before key {key!r}."
-                    )
-                if key not in current_env:
-                    raise ValueError(
-                        f"Key {key!r} does not exist while resolving "
-                        f"environment path {path!r}."
-                    )
-                if key not in current_schema:
-                    current_schema[key] = {}
-                    current_reduced_env[key] = {}
-
-                current_schema = current_schema[key]
-                current_env = current_env[key]
-                current_reduced_env = current_reduced_env[key]
-
-            leaf_key = path[-1]
-            if not isinstance(current_env, dict):
-                raise ValueError(
-                    f"Environment path {path!r} ends inside a non-dictionary "
-                    "value."
-                )
-            if leaf_key not in current_env:
-                raise ValueError(
-                    f"Key {leaf_key!r} does not exist while resolving "
-                    f"environment path {path!r}."
-                )
-
-            leaf_value = current_env[leaf_key]
-            current_schema[leaf_key] = get_sql_type(leaf_value)
-            current_reduced_env[leaf_key] = cast_sql_type(leaf_value)
-
-        for path in self.get_used_leaves(env=env):
-            add_path_to_schema(path)
-
-        return env_schema, reduced_env
+    @staticmethod
+    def restore_environment(
+        env_schema: dict[str, Any],
+        reduced_env: dict[str, Any],
+    ) -> Any:
+        """Reconstruct a saved reduced environment from its schema."""
+        return deserialize_reduced_environment(env_schema, reduced_env)
 
     def get_used_leaves(
         self,
-        env: dict[Hashable, Any] | None = None,
+        env: Any | None = None,
     ) -> set[EnvPath]:
         """Return typed paths for all environment leaves used by this path."""
         used_leaves: set[EnvPath] = set()

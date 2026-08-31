@@ -6,6 +6,12 @@ import json
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Hashable, Iterable, Literal, NamedTuple, Sequence, Dict
+
+from jmaps.journey.containers import (
+    DEFAULT_CONTAINER_REGISTRY,
+    ContainerRegistry,
+    format_env_path,
+)
 import logging 
 
 logger = logging.getLogger(__name__)
@@ -264,125 +270,152 @@ class EnvTree:
     
     def get_used_leaves(
         self,
-        env: dict[Hashable, Any] | None = None,
+        env: Any | None = None,
+        *,
+        registry: ContainerRegistry = DEFAULT_CONTAINER_REGISTRY,
     ) -> set[EnvPath]:
-        """Return typed paths for all used leaf nodes in this tree.
+        """Return typed paths for all used runtime leaves.
 
-        When ``env`` is supplied, a used dictionary branch is expanded to the
-        actual leaves below that branch. Path entries retain their original
-        types, so ``env["records"][1]["x"]`` is represented as
-        ``("records", 1, "x")``.
-
-        The tree root is excluded from returned paths.
+        Dictionary selectors retain their key types, while list, tuple, and
+        post-registered sequence entries use integer selectors. When a whole
+        container is used, it is recursively expanded through its adapter.
         """
-        used_paths: set[EnvPath] = set()
-        resolve_env = env is not None
-
-        def add_leaves(
-            deeper_env: dict[Hashable, Any],
-            parent_path: EnvPath,
-        ) -> None:
-            for key, value in deeper_env.items():
-                child_path = (*parent_path, key)
-                if isinstance(value, dict):
-                    add_leaves(value, child_path)
-                else:
-                    used_paths.add(child_path)
-
-        def visit(
-            node: EnvNode,
-            current_env: Any,
-            parent_path: EnvPath,
-        ) -> None:
-            for child in node.children.values():
-                child_path = (*parent_path, child.key)
-                deeper_env: Any = None
-
-                if resolve_env:
-                    if not isinstance(current_env, dict):
-                        raise ValueError(
-                            f"Environment path {parent_path!r} is not a "
-                            f"dictionary, so it cannot contain {child.key!r}."
-                        )
-                    if child.key not in current_env:
-                        raise ValueError(
-                            f"Key {child.key!r} does not exist at environment "
-                            f"path {parent_path!r}."
-                        )
-                    deeper_env = current_env[child.key]
-
-                if child.used and not child.children:
-                    if resolve_env and isinstance(deeper_env, dict):
-                        add_leaves(deeper_env, child_path)
-                    else:
-                        used_paths.add(child_path)
-
-                # Always inspect descendants. A child can be used even when its
-                # parent is not, such as env["branch"]["leaf"].
-                visit(child, deeper_env, child_path)
-
-        visit(self.root, env, ())
-        return used_paths
+        return _collect_marked_leaf_paths(
+            self,
+            env,
+            marker="used",
+            registry=registry,
+        )
 
     def get_overwritten_leaves(
         self,
-        env: dict[Hashable, Any] | None = None,
+        env: Any | None = None,
+        *,
+        registry: ContainerRegistry = DEFAULT_CONTAINER_REGISTRY,
     ) -> set[EnvPath]:
-        """Return typed paths for all overwritten leaf nodes in this tree.
+        """Return typed paths for all overwritten runtime leaves."""
+        return _collect_marked_leaf_paths(
+            self,
+            env,
+            marker="overwritten",
+            registry=registry,
+        )
 
-        When ``env`` is supplied, an overwritten dictionary branch is expanded
-        to the actual leaves below that branch. Path entries retain their
-        original types.
-        """
-        overwritten_paths: set[EnvPath] = set()
-        resolve_env = env is not None
-
-        def add_leaves(
-            deeper_env: dict[Hashable, Any],
-            parent_path: EnvPath,
-        ) -> None:
-            for key, value in deeper_env.items():
-                child_path = (*parent_path, key)
-                if isinstance(value, dict):
-                    add_leaves(value, child_path)
-                else:
-                    overwritten_paths.add(child_path)
-
-        def visit(
-            node: EnvNode,
-            current_env: Any,
-            parent_path: EnvPath,
-        ) -> None:
-            for child in node.children.values():
-                child_path = (*parent_path, child.key)
-                deeper_env: Any = None
-
-                if resolve_env:
-                    if not isinstance(current_env, dict):
-                        raise ValueError(
-                            f"Environment path {parent_path!r} is not a "
-                            f"dictionary, so it cannot contain {child.key!r}."
-                        )
-                    if child.key not in current_env:
-                        raise ValueError(
-                            f"Key {child.key!r} does not exist at environment "
-                            f"path {parent_path!r}."
-                        )
-                    deeper_env = current_env[child.key]
-
-                if child.overwritten and not child.children:
-                    if resolve_env and isinstance(deeper_env, dict):
-                        add_leaves(deeper_env, child_path)
-                    else:
-                        overwritten_paths.add(child_path)
-
-                visit(child, deeper_env, child_path)
-
-        visit(self.root, env, ())
-        return overwritten_paths
-        
     def __repr__(self) -> str:
         return json.dumps(self.to_dict(), indent=2, default=repr)
+
+
+def _collect_marked_leaf_paths(
+    tree: EnvTree,
+    env: Any | None,
+    *,
+    marker: Literal["used", "overwritten"],
+    registry: ContainerRegistry,
+) -> set[EnvPath]:
+    """Resolve symbolic tree nodes against registered runtime containers."""
+    result: set[EnvPath] = set()
+    has_runtime_env = env is not None
+    unresolved = object()
+
+    def flatten_runtime_leaves(
+        value: Any,
+        path: EnvPath,
+        active_container_ids: frozenset[int],
+    ) -> None:
+        adapter = registry.for_value(value)
+        if adapter is None:
+            result.add(path)
+            return
+
+        object_id = id(value)
+        if object_id in active_container_ids:
+            raise ValueError(
+                "Cyclic environment container encountered at "
+                f"{format_env_path(path)}."
+            )
+
+        found_child = False
+        next_active = active_container_ids | {object_id}
+        for selector, child_value in adapter.iter_children(value):
+            found_child = True
+            flatten_runtime_leaves(
+                child_value,
+                (*path, selector),
+                next_active,
+            )
+
+        # Empty containers remain dependencies so their registered type is
+        # represented in env_schema.
+        if not found_child:
+            result.add(path)
+
+    def resolve_child(
+        value: Any,
+        selector: Hashable,
+        parent_path: EnvPath,
+    ) -> tuple[Hashable, Any]:
+        adapter = registry.for_value(value)
+        if adapter is None:
+            raise ValueError(
+                f"Environment path {format_env_path(parent_path)} contains "
+                f"non-container {type(value).__name__}, so it cannot contain "
+                f"selector {selector!r}."
+            )
+        try:
+            canonical_selector = adapter.normalize_selector(value, selector)
+            return canonical_selector, adapter.get_child(
+                value,
+                canonical_selector,
+            )
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Selector {selector!r} does not exist at environment path "
+                f"{format_env_path(parent_path)} ({adapter.type_id})."
+            ) from exc
+
+    def visit(node: EnvNode, value: Any, parent_path: EnvPath) -> None:
+        for child_node in node.children.values():
+            selector = child_node.key
+            canonical_selector = selector
+            child_value = unresolved
+            if has_runtime_env:
+                canonical_selector, child_value = resolve_child(
+                    value,
+                    selector,
+                    parent_path,
+                )
+            child_path = (*parent_path, canonical_selector)
+
+            if getattr(child_node, marker):
+                if has_runtime_env:
+                    # A marked node denotes use/overwrite of the complete
+                    # runtime value, even when the symbolic analyzer already
+                    # knows about some descendants from other expressions.
+                    # Expanding here prevents those known descendants from
+                    # hiding unmentioned list/tuple/dict entries.
+                    flatten_runtime_leaves(
+                        child_value,
+                        child_path,
+                        frozenset(),
+                    )
+                else:
+                    result.add(child_path)
+
+            # Always validate and collect independently marked descendants.
+            # ``result`` is a set, so entries already covered by a complete
+            # marked parent are harmlessly deduplicated.
+            visit(child_node, child_value, child_path)
+
+    if getattr(tree.root, marker):
+        if has_runtime_env:
+            flatten_runtime_leaves(env, (), frozenset())
+        else:
+            result.add(())
+
+    # Descendants can be marked even when their parent is not. Visiting them
+    # also validates selectors when a complete ancestor was marked.
+    visit(tree.root, env if has_runtime_env else unresolved, ())
+    return result
 
 def get_qualified_name(local_name, namespace: dict[str, Any]) -> str | None:
     local_path = local_name.split(".")
@@ -421,7 +454,7 @@ class FunctionCall(NamedTuple):
         return runtime_name
 
     def get_overwritten_leaves(
-        self, env: dict[Hashable, Any] | None = None
+        self, env: Any | None = None
     ) -> set[EnvPath]:
         """Return the set of paths that are overwritten in this function call."""
         return self.overwritten_tree.get_overwritten_leaves(env=env)

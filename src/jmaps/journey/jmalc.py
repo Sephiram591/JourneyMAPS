@@ -6,7 +6,7 @@ types and schemas.
 """
 
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
     TIMESTAMP,
     Column,
@@ -90,6 +90,25 @@ def cast_sql_type(value):
         f"Value: {value}, with type {type(value)} is not a valid type for sql "
         "(int, float, bool, str, datetime)."
     )
+
+def restore_sql_type(value, sql_type: str):
+    """Restore a scalar previously converted by :func:`cast_sql_type`.
+
+    Container reconstruction is handled by ``jmaps.journey.containers`` because
+    env_schema stores the registered list/tuple/custom-container adapter.
+    """
+    if sql_type == "bool":
+        return bool(value)
+    if sql_type == "float":
+        return float(value)
+    if sql_type == "int":
+        return int(value)
+    if sql_type == "str":
+        return str(value)
+    if sql_type == "datetime":
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    raise TypeError(f"Unsupported scalar SQL type {sql_type!r}.")
+
 
 def is_sql_type(value):
     """Check if a Python value can be represented as a SQL type.
